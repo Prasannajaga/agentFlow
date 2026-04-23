@@ -1,6 +1,6 @@
 # AgentFlow
 
-Phase 3 adds Postgres-backed read access on top of the Phase 2 registration flow, still using strict checked-in SQL migration files with lightweight tracking in `schema_migrations`.
+Phase 4 adds the first persisted execution flow on top of registration and read support. Runs execute synchronously in-process with a deterministic fake provider, and the full run lifecycle is stored in Postgres.
 
 ## Install
 
@@ -84,6 +84,30 @@ The command prints agent metadata plus the latest registered version summary.
 
 The command prints all known versions for that agent, ordered by highest version number first.
 
+## Run one agent synchronously
+
+```bash
+.venv/bin/agentflow run <agent_id>
+```
+
+The command loads the latest agent version, creates an `agent_runs` row, moves the run through `pending`, `running`, and `completed` or `failed`, and stores the final output JSON.
+
+## List runs
+
+```bash
+.venv/bin/agentflow runs
+```
+
+The command prints persisted runs newest first.
+
+## Show one run
+
+```bash
+.venv/bin/agentflow run-show <run_id>
+```
+
+The command prints the stored run metadata and pretty-prints `output_json` for completed runs.
+
 ## Validate the invalid example
 
 ```bash
@@ -111,5 +135,6 @@ Phase 1 also accepts the prompt's alternate command shape and treats it as local
 ```sql
 SELECT id, name, created_at FROM agent_definitions;
 SELECT id, agent_id, version_number, config_hash FROM agent_versions;
+SELECT id, agent_id, version_id, status, created_at, started_at, ended_at FROM agent_runs ORDER BY created_at DESC;
 SELECT version, name, applied_at FROM schema_migrations ORDER BY version;
 ```

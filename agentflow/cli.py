@@ -7,7 +7,7 @@ import sys
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Sequence
+from typing import IO, Sequence
 
 from pydantic import ValidationError
 from sqlalchemy.exc import OperationalError, ProgrammingError, SQLAlchemyError
@@ -31,6 +31,12 @@ from agentflow.config import (
 )
 from agentflow.services.db_migrations import apply_sql_migrations
 from agentflow.services.agent_registry import register_agent
+from agentflow.services.agent_runner import (
+    AgentNotFoundError,
+    AgentRunExecutionFailedError,
+    AgentVersionNotFoundError,
+    run_registered_agent,
+)
 from agentflow.services.agent_queries import (
     AgentDetail,
     AgentSummary,
@@ -39,6 +45,7 @@ from agentflow.services.agent_queries import (
     list_agent_versions,
     list_registered_agents,
 )
+from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.yaml_loader import AgentYamlError, load_agent_document, normalize_agent_config
 
 DEFAULT_LOCAL_DATABASE_NAME = "flow_agent"
@@ -84,6 +91,14 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
 
     versions_parser = subparsers.add_parser("versions", help="List versions for one registered agent.")
     versions_parser.add_argument("agent_id", help="UUID of the agent whose versions should be displayed.")
+
+    run_parser = subparsers.add_parser("run", help="Run one registered agent synchronously.")
+    run_parser.add_argument("agent_id", help="UUID of the agent to run.")
+
+    subparsers.add_parser("runs", help="List agent runs.")
+
+    run_show_parser = subparsers.add_parser("run-show", help="Show one persisted agent run.")
+    run_show_parser.add_argument("run_id", help="UUID of the run to display.")
 
     db_parser = subparsers.add_parser("db", help="Database configuration helpers.")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
@@ -251,16 +266,31 @@ def apply_env_values(values: dict[str, str | None]) -> None:
 
 
 def parse_agent_id(value: str) -> uuid.UUID:
+    return parse_uuid_value(value, label="agent_id")
+
+
+def parse_run_id(value: str) -> uuid.UUID:
+    return parse_uuid_value(value, label="run_id")
+
+
+def parse_uuid_value(value: str, *, label: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
     except ValueError as exc:
-        raise ValueError(f"Invalid agent_id '{value}'. Expected a UUID.") from exc
+        raise ValueError(f"Invalid {label} '{value}'. Expected a UUID.") from exc
 
 
 def format_timestamp(value: datetime) -> str:
     if value.tzinfo is None:
         value = value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def format_optional_timestamp(value: datetime | None) -> str:
+    if value is None:
+        return "-"
+
+    return format_timestamp(value)
 
 
 def summarize_text(value: str | None, *, fallback: str = "-", width: int | None = None) -> str:
@@ -277,8 +307,8 @@ def summarize_text(value: str | None, *, fallback: str = "-", width: int | None 
     return collapsed
 
 
-def print_key_value(key: str, value: object) -> None:
-    print(f"{key}: {value}")
+def print_key_value(key: str, value: object, *, file: IO[str] = sys.stdout) -> None:
+    print(f"{key}: {value}", file=file)
 
 
 def render_table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
@@ -330,6 +360,21 @@ def print_versions_table(versions: Sequence[AgentVersionSummary]) -> None:
     print(render_table(("version_id", "version_number", "config_hash", "created_at"), rows))
 
 
+def print_runs_table(runs: Sequence[AgentRunSummary]) -> None:
+    rows = [
+        (
+            run.run_id,
+            run.agent_id,
+            run.status,
+            format_timestamp(run.created_at),
+            format_optional_timestamp(run.started_at),
+            format_optional_timestamp(run.ended_at),
+        )
+        for run in runs
+    ]
+    print(render_table(("run_id", "agent_id", "status", "created_at", "started_at", "ended_at"), rows))
+
+
 def print_agent_detail(agent: AgentDetail) -> None:
     print_key_value("agent_id", agent.agent_id)
     print_key_value("name", agent.name)
@@ -349,6 +394,48 @@ def print_agent_detail(agent: AgentDetail) -> None:
     print(f"  created_at: {format_timestamp(agent.latest_version.created_at)}")
 
 
+def print_run_summary(run: AgentRunDetail, *, file: IO[str] = sys.stdout) -> None:
+    print_key_value("run_id", run.run_id, file=file)
+    print_key_value("agent_id", run.agent_id, file=file)
+    print_key_value("version_id", run.version_id, file=file)
+    print_key_value("status", run.status, file=file)
+    print_key_value("created_at", format_timestamp(run.created_at), file=file)
+    print_key_value("started_at", format_optional_timestamp(run.started_at), file=file)
+    print_key_value("ended_at", format_optional_timestamp(run.ended_at), file=file)
+    print_key_value("output_summary", summarize_run_output(run.output_json), file=file)
+
+
+def print_run_detail(run: AgentRunDetail, *, file: IO[str] = sys.stdout) -> None:
+    print_run_summary(run, file=file)
+
+    if run.error_message:
+        print_key_value("error_message", run.error_message, file=file)
+
+    if run.output_json is not None:
+        print(file=file)
+        print("output_json:", file=file)
+        print(json.dumps(run.output_json, indent=2), file=file)
+
+
+def summarize_run_output(output_json: dict[str, object] | None) -> str:
+    if output_json is None:
+        return "-"
+
+    parts: list[str] = []
+    provider = output_json.get("provider")
+    model = output_json.get("model")
+    message = output_json.get("message")
+
+    if provider:
+        parts.append(str(provider))
+    if model:
+        parts.append(str(model))
+    if message:
+        parts.append(summarize_text(str(message), width=60))
+
+    return " | ".join(parts) or "stored"
+
+
 def format_database_error_message(exc: SQLAlchemyError) -> str:
     original = getattr(exc, "orig", None)
     if original is not None:
@@ -357,7 +444,7 @@ def format_database_error_message(exc: SQLAlchemyError) -> str:
     return str(exc)
 
 
-def handle_agent_query_error(exc: Exception, *, action: str) -> int:
+def handle_cli_query_error(exc: Exception, *, action: str) -> int:
     if isinstance(exc, ValueError):
         print(str(exc), file=sys.stderr)
         return 1
@@ -585,7 +672,7 @@ def run_list_agents() -> int:
     try:
         agents = list_registered_agents()
     except Exception as exc:
-        return handle_agent_query_error(exc, action="List agents")
+        return handle_cli_query_error(exc, action="List agents")
 
     if not agents:
         print("No registered agents found.")
@@ -600,7 +687,7 @@ def run_show_agent(agent_id_text: str) -> int:
         agent_id = parse_agent_id(agent_id_text)
         agent = get_registered_agent(agent_id)
     except Exception as exc:
-        return handle_agent_query_error(exc, action="Show agent")
+        return handle_cli_query_error(exc, action="Show agent")
 
     if agent is None:
         print(f"Agent not found: {agent_id}", file=sys.stderr)
@@ -615,7 +702,7 @@ def run_list_agent_versions(agent_id_text: str) -> int:
         agent_id = parse_agent_id(agent_id_text)
         versions = list_agent_versions(agent_id)
     except Exception as exc:
-        return handle_agent_query_error(exc, action="List agent versions")
+        return handle_cli_query_error(exc, action="List agent versions")
 
     if versions is None:
         print(f"Agent not found: {agent_id}", file=sys.stderr)
@@ -629,6 +716,57 @@ def run_list_agent_versions(agent_id_text: str) -> int:
         return 0
 
     print_versions_table(versions)
+    return 0
+
+
+def run_run_agent(agent_id_text: str) -> int:
+    try:
+        agent_id = parse_agent_id(agent_id_text)
+        run = run_registered_agent(agent_id)
+    except AgentNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AgentVersionNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AgentRunExecutionFailedError as exc:
+        print("Run failed", file=sys.stderr)
+        print_run_detail(exc.run, file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Run agent")
+
+    print("Run completed")
+    print_run_summary(run)
+    return 0
+
+
+def run_list_runs() -> int:
+    try:
+        runs = list_agent_runs()
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="List runs")
+
+    if not runs:
+        print("No runs found.")
+        return 0
+
+    print_runs_table(runs)
+    return 0
+
+
+def run_show_run(run_id_text: str) -> int:
+    try:
+        run_id = parse_run_id(run_id_text)
+        run = get_agent_run(run_id)
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Show run")
+
+    if run is None:
+        print(f"Run not found: {run_id}", file=sys.stderr)
+        return 1
+
+    print_run_detail(run)
     return 0
 
 
@@ -647,6 +785,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_show_agent(args.agent_id)
     if args.command == "versions":
         return run_list_agent_versions(args.agent_id)
+    if args.command == "run":
+        return run_run_agent(args.agent_id)
+    if args.command == "runs":
+        return run_list_runs()
+    if args.command == "run-show":
+        return run_show_run(args.run_id)
     if args.command == "db":
         if args.db_command == "show":
             return run_db_show(args.json)
