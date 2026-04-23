@@ -1,0 +1,31 @@
+name: "   "
+version: 0
+
+provider:
+  type: openai
+  model: ""
+
+system_prompt: ""
+
+runtime:
+  max_steps: 0
+  timeout_seconds: 0
+  retry:
+    max_attempts: -1
+    backoff_seconds: -5
+
+tools:
+  - web_search
+  - 42
+
+task:
+  input_schema:
+    topic: ""
+
+telemetry:
+  log_level: verbose
+
+outputs:
+  save_final_text: "sometimes"
+
+unexpected_field: true

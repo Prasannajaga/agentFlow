@@ -1,0 +1,38 @@
+name: text-agent
+version: 1
+description: Simple research agent
+
+provider:
+  type: openai
+  model: gpt-4.1
+  base_url: https://api.openai.com/v1
+  api_key_ref: secret/openai/main
+
+system_prompt: |
+  You are a focused research agent.
+
+runtime:
+  max_steps: 12
+  timeout_seconds: 900
+  retry:
+    max_attempts: 3
+    backoff_seconds: 5
+
+tools:
+  - web_search
+  - browser
+
+task:
+  type: research
+  input_schema:
+    topic: string
+    depth: string
+
+telemetry:
+  trace_enabled: true
+  log_level: info
+  store_prompts: true
+
+outputs:
+  save_final_text: true
+  save_artifacts: true
