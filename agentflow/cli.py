@@ -27,6 +27,7 @@ from agentflow.config import (
     get_settings,
     redact_database_url,
 )
+from agentflow.services.db_migrations import apply_sql_migrations
 from agentflow.services.agent_registry import register_agent
 from agentflow.services.yaml_loader import AgentYamlError, load_agent_document, normalize_agent_config
 
@@ -71,6 +72,11 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
 
     db_show_parser = db_subparsers.add_parser("show", help="Show the resolved database settings.")
     db_show_parser.add_argument("--json", action="store_true", help="Print the resolved settings as JSON.")
+
+    db_subparsers.add_parser(
+        "migrate",
+        help="Apply versioned SQL schema files tracked in schema_migrations.",
+    )
 
     db_setup_parser = db_subparsers.add_parser("setup", help="Write database settings to an env file.")
     db_setup_mode = db_setup_parser.add_mutually_exclusive_group(required=True)
@@ -315,6 +321,43 @@ def run_db_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def run_db_migrate() -> int:
+    try:
+        result = apply_sql_migrations()
+    except ConfigurationError as exc:
+        print("Database migration failed: missing configuration.", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+        return 1
+    except FileNotFoundError as exc:
+        print("Database migration failed: migration files not found.", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+        return 1
+    except SQLAlchemyError as exc:
+        print("Database migration failed due to a database error.", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+
+        if isinstance(exc, OperationalError):
+            print(
+                "- Verify DATABASE_URL or your DATABASE_HOST/DATABASE_PORT settings point to a reachable Postgres instance.",
+                file=sys.stderr,
+            )
+
+        return 1
+    except Exception as exc:
+        print("Database migration failed.", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+        return 1
+
+    if result.applied_migrations:
+        print("Database migrations applied and recorded in schema_migrations")
+        for migration_name in result.applied_migrations:
+            print(f"- {migration_name}")
+        return 0
+
+    print("Database schema is up to date")
+    return 0
+
+
 def run_validate(path: Path) -> int:
     try:
         document = load_agent_document(path)
@@ -372,7 +415,7 @@ def run_register(path: Path) -> int:
                 file=sys.stderr,
             )
         elif isinstance(exc, ProgrammingError):
-            print("- Verify the schema exists by running `alembic upgrade head`.", file=sys.stderr)
+            print("- Verify the schema exists by running `agentflow db migrate`.", file=sys.stderr)
 
         return 1
 
@@ -398,6 +441,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_db_show(args.json)
         if args.db_command == "setup":
             return run_db_setup(args)
+        if args.db_command == "migrate":
+            return run_db_migrate()
 
     parser.print_help(sys.stderr)
     return 1
