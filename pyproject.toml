@@ -9,8 +9,11 @@ description = "Phase 1 YAML agent schema validation CLI"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "alembic>=1.13,<2",
   "pydantic>=2.7,<3",
+  "psycopg[binary]>=3.1,<4",
   "PyYAML>=6.0,<7",
+  "SQLAlchemy>=2.0,<3",
 ]
 
 [project.scripts]
