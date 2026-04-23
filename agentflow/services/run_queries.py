@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Literal
@@ -10,6 +11,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from agentflow.db.models import AgentDefinition, AgentRun, AgentVersion, utc_now
 from agentflow.db.session import create_session_factory
+from agentflow.services.run_events import (
+    RUN_EVENT_RUN_CREATED,
+    RUN_EVENT_RUN_ENQUEUED,
+    RUN_EVENT_RUN_STARTED,
+    RUN_EVENT_WORKER_PICKED_UP_RUN,
+    RunEventCreate,
+    record_run_events,
+)
 
 RunStatus = Literal["pending", "running", "completed", "failed"]
 
@@ -17,6 +26,7 @@ RUN_STATUS_PENDING: RunStatus = "pending"
 RUN_STATUS_RUNNING: RunStatus = "running"
 RUN_STATUS_COMPLETED: RunStatus = "completed"
 RUN_STATUS_FAILED: RunStatus = "failed"
+TERMINAL_RUN_STATUSES = frozenset({RUN_STATUS_COMPLETED, RUN_STATUS_FAILED})
 _UNSET = object()
 
 
@@ -108,18 +118,86 @@ def create_agent_run(
                 updated_at=now,
             )
             session.add(run)
+            session.flush()
+            record_run_events(
+                run.id,
+                events=(
+                    RunEventCreate(
+                        event_type=RUN_EVENT_RUN_CREATED,
+                        message="Run row created.",
+                        payload_json={
+                            "agent_id": str(agent_id),
+                            "version_id": str(version_id),
+                            "initial_status": RUN_STATUS_PENDING,
+                        },
+                    ),
+                    RunEventCreate(
+                        event_type=RUN_EVENT_RUN_ENQUEUED,
+                        message="Run is pending and available for worker pickup.",
+                        payload_json={"status": RUN_STATUS_PENDING},
+                    ),
+                ),
+                session=session,
+            )
+
+        return _build_run_detail(run)
+
+
+def claim_next_pending_run(
+    *,
+    worker_id: str | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+) -> AgentRunDetail | None:
+    session_factory = session_factory or create_session_factory()
+    now = utc_now()
+
+    with session_factory() as session:
+        with session.begin():
+            run = session.execute(
+                select(AgentRun)
+                .where(AgentRun.status == RUN_STATUS_PENDING)
+                .order_by(AgentRun.created_at.asc(), AgentRun.id.asc())
+                .with_for_update(skip_locked=True)
+                .limit(1)
+            ).scalars().first()
+
+            if run is None:
+                return None
+
+            run.status = RUN_STATUS_RUNNING
+            run.started_at = now
+            run.updated_at = now
+            record_run_events(
+                run.id,
+                events=(
+                    RunEventCreate(
+                        event_type=RUN_EVENT_WORKER_PICKED_UP_RUN,
+                        message="Worker claimed the pending run.",
+                        payload_json={"worker_id": worker_id} if worker_id is not None else None,
+                    ),
+                    RunEventCreate(
+                        event_type=RUN_EVENT_RUN_STARTED,
+                        message="Run moved to running state.",
+                        payload_json={"status": RUN_STATUS_RUNNING},
+                    ),
+                ),
+                session=session,
+            )
 
         return _build_run_detail(run)
 
 
 def mark_agent_run_running(
     run_id: uuid.UUID,
+    *,
+    events: Sequence[RunEventCreate] = (),
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRunDetail | None:
     return _update_agent_run(
         run_id,
         status=RUN_STATUS_RUNNING,
         started_at=utc_now(),
+        events=events,
         session_factory=session_factory,
     )
 
@@ -128,6 +206,7 @@ def mark_agent_run_completed(
     run_id: uuid.UUID,
     *,
     output_json: dict[str, Any],
+    events: Sequence[RunEventCreate] = (),
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRunDetail | None:
     return _update_agent_run(
@@ -136,6 +215,7 @@ def mark_agent_run_completed(
         output_json=output_json,
         ended_at=utc_now(),
         error_message=None,
+        events=events,
         session_factory=session_factory,
     )
 
@@ -144,6 +224,7 @@ def mark_agent_run_failed(
     run_id: uuid.UUID,
     *,
     error_message: str,
+    events: Sequence[RunEventCreate] = (),
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRunDetail | None:
     return _update_agent_run(
@@ -151,6 +232,7 @@ def mark_agent_run_failed(
         status=RUN_STATUS_FAILED,
         error_message=error_message,
         ended_at=utc_now(),
+        events=events,
         session_factory=session_factory,
     )
 
@@ -209,6 +291,7 @@ def _update_agent_run(
     ended_at: datetime | None | object = _UNSET,
     output_json: dict[str, Any] | None | object = _UNSET,
     error_message: str | None | object = _UNSET,
+    events: Sequence[RunEventCreate] = (),
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRunDetail | None:
     session_factory = session_factory or create_session_factory()
@@ -230,6 +313,8 @@ def _update_agent_run(
                 run.output_json = output_json
             if error_message is not _UNSET:
                 run.error_message = error_message
+            if events:
+                record_run_events(run.id, events=events, session=session)
 
         return _build_run_detail(run)
 

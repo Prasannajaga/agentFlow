@@ -1,17 +1,19 @@
-name: text-agent
+name: text-agent-openai-compatible
 version: 1
-description: Simple research agent
+description: Simple research agent using an OpenAI-compatible chat-completions endpoint
 
 provider:
-  type: fake
-  model: stub-model
+  type: openai_compatible
+  model: gpt-4.1-mini
+  base_url: https://api.openai.com/v1
+  api_key_ref: env:OPENAI_API_KEY
 
 system_prompt: |
   You are a focused research agent.
 
 runtime:
   max_steps: 12
-  timeout_seconds: 900
+  timeout_seconds: 60
   retry:
     max_attempts: 3
     backoff_seconds: 5

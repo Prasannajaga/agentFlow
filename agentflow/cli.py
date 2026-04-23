@@ -33,9 +33,8 @@ from agentflow.services.db_migrations import apply_sql_migrations
 from agentflow.services.agent_registry import register_agent
 from agentflow.services.agent_runner import (
     AgentNotFoundError,
-    AgentRunExecutionFailedError,
     AgentVersionNotFoundError,
-    run_registered_agent,
+    create_run_for_agent,
 )
 from agentflow.services.agent_queries import (
     AgentDetail,
@@ -46,6 +45,8 @@ from agentflow.services.agent_queries import (
     list_registered_agents,
 )
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
+from agentflow.services.run_events import RunEventRecord, RunEventSummary, get_run_event_summary, list_run_events
+from agentflow.services.worker_jobs import start_worker_loop
 from agentflow.services.yaml_loader import AgentYamlError, load_agent_document, normalize_agent_config
 
 DEFAULT_LOCAL_DATABASE_NAME = "flow_agent"
@@ -92,13 +93,18 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     versions_parser = subparsers.add_parser("versions", help="List versions for one registered agent.")
     versions_parser.add_argument("agent_id", help="UUID of the agent whose versions should be displayed.")
 
-    run_parser = subparsers.add_parser("run", help="Run one registered agent synchronously.")
+    run_parser = subparsers.add_parser("run", help="Create one pending agent run for background execution.")
     run_parser.add_argument("agent_id", help="UUID of the agent to run.")
 
     subparsers.add_parser("runs", help="List agent runs.")
 
     run_show_parser = subparsers.add_parser("run-show", help="Show one persisted agent run.")
     run_show_parser.add_argument("run_id", help="UUID of the run to display.")
+
+    run_events_parser = subparsers.add_parser("run-events", help="Show the persisted event timeline for one run.")
+    run_events_parser.add_argument("run_id", help="UUID of the run whose events should be displayed.")
+
+    subparsers.add_parser("worker", help="Start the background run worker.")
 
     db_parser = subparsers.add_parser("db", help="Database configuration helpers.")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
@@ -405,8 +411,16 @@ def print_run_summary(run: AgentRunDetail, *, file: IO[str] = sys.stdout) -> Non
     print_key_value("output_summary", summarize_run_output(run.output_json), file=file)
 
 
-def print_run_detail(run: AgentRunDetail, *, file: IO[str] = sys.stdout) -> None:
+def print_run_detail(
+    run: AgentRunDetail,
+    *,
+    event_summary: RunEventSummary | None = None,
+    file: IO[str] = sys.stdout,
+) -> None:
     print_run_summary(run, file=file)
+    if event_summary is not None:
+        print_key_value("event_count", event_summary.event_count, file=file)
+        print_key_value("latest_event_type", event_summary.latest_event_type or "-", file=file)
 
     if run.error_message:
         print_key_value("error_message", run.error_message, file=file)
@@ -422,9 +436,9 @@ def summarize_run_output(output_json: dict[str, object] | None) -> str:
         return "-"
 
     parts: list[str] = []
-    provider = output_json.get("provider")
+    provider = output_json.get("provider_type") or output_json.get("provider")
     model = output_json.get("model")
-    message = output_json.get("message")
+    message = output_json.get("output_text") or output_json.get("message")
 
     if provider:
         parts.append(str(provider))
@@ -434,6 +448,28 @@ def summarize_run_output(output_json: dict[str, object] | None) -> str:
         parts.append(summarize_text(str(message), width=60))
 
     return " | ".join(parts) or "stored"
+
+
+def format_payload_json(payload_json: dict[str, object] | None) -> str:
+    if payload_json is None:
+        return "-"
+
+    return json.dumps(payload_json, sort_keys=True, separators=(", ", ": "))
+
+
+def print_run_events(run_id: uuid.UUID, events: Sequence[RunEventRecord], *, file: IO[str] = sys.stdout) -> None:
+    print_key_value("run_id", run_id, file=file)
+    print_key_value("event_count", len(events), file=file)
+    print(file=file)
+
+    for event in events:
+        message = summarize_text(event.message, fallback="-")
+        print(
+            f"{format_timestamp(event.created_at)}  {event.event_type}  {message}",
+            file=file,
+        )
+        if event.payload_json is not None:
+            print(f"  payload_json: {format_payload_json(event.payload_json)}", file=file)
 
 
 def format_database_error_message(exc: SQLAlchemyError) -> str:
@@ -722,22 +758,19 @@ def run_list_agent_versions(agent_id_text: str) -> int:
 def run_run_agent(agent_id_text: str) -> int:
     try:
         agent_id = parse_agent_id(agent_id_text)
-        run = run_registered_agent(agent_id)
+        prepared_run = create_run_for_agent(agent_id)
     except AgentNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except AgentVersionNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
-    except AgentRunExecutionFailedError as exc:
-        print("Run failed", file=sys.stderr)
-        print_run_detail(exc.run, file=sys.stderr)
-        return 1
     except Exception as exc:
-        return handle_cli_query_error(exc, action="Run agent")
+        return handle_cli_query_error(exc, action="Create run")
 
-    print("Run completed")
-    print_run_summary(run)
+    print("Run created")
+    print_run_summary(prepared_run.run)
+    print_key_value("message", "Run is pending and will be picked up by a worker.")
     return 0
 
 
@@ -759,6 +792,7 @@ def run_show_run(run_id_text: str) -> int:
     try:
         run_id = parse_run_id(run_id_text)
         run = get_agent_run(run_id)
+        event_summary = get_run_event_summary(run_id)
     except Exception as exc:
         return handle_cli_query_error(exc, action="Show run")
 
@@ -766,7 +800,39 @@ def run_show_run(run_id_text: str) -> int:
         print(f"Run not found: {run_id}", file=sys.stderr)
         return 1
 
-    print_run_detail(run)
+    print_run_detail(run, event_summary=event_summary)
+    return 0
+
+
+def run_show_run_events(run_id_text: str) -> int:
+    try:
+        run_id = parse_run_id(run_id_text)
+        run = get_agent_run(run_id)
+        events = list_run_events(run_id)
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Show run events")
+
+    if run is None:
+        print(f"Run not found: {run_id}", file=sys.stderr)
+        return 1
+
+    if not events:
+        print(f"No run events found for run: {run_id}")
+        return 0
+
+    print_run_events(run_id, events)
+    return 0
+
+
+def run_worker() -> int:
+    try:
+        start_worker_loop()
+    except KeyboardInterrupt:
+        print("Worker stopped.")
+        return 0
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Worker start")
+
     return 0
 
 
@@ -791,6 +857,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_list_runs()
     if args.command == "run-show":
         return run_show_run(args.run_id)
+    if args.command == "run-events":
+        return run_show_run_events(args.run_id)
+    if args.command == "worker":
+        return run_worker()
     if args.command == "db":
         if args.db_command == "show":
             return run_db_show(args.json)

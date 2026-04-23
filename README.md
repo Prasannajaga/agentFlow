@@ -1,6 +1,6 @@
 # AgentFlow
 
-Phase 4 adds the first persisted execution flow on top of registration and read support. Runs execute synchronously in-process with a deterministic fake provider, and the full run lifecycle is stored in Postgres.
+Phase 5 adds background run execution on top of the Phase 4 persistence model. Runs are created in Postgres, claimed directly from Postgres by a worker process, and executed with the same deterministic fake provider.
 
 ## Install
 
@@ -84,13 +84,21 @@ The command prints agent metadata plus the latest registered version summary.
 
 The command prints all known versions for that agent, ordered by highest version number first.
 
-## Run one agent synchronously
+## Create one pending agent run
 
 ```bash
 .venv/bin/agentflow run <agent_id>
 ```
 
-The command loads the latest agent version, creates an `agent_runs` row, moves the run through `pending`, `running`, and `completed` or `failed`, and stores the final output JSON.
+The command loads the latest agent version, creates an `agent_runs` row with `pending`, and returns immediately.
+
+## Start the worker
+
+```bash
+.venv/bin/agentflow worker
+```
+
+The worker polls Postgres for pending runs, claims one safely, and moves it through `running` and `completed` or `failed`.
 
 ## List runs
 
