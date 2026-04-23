@@ -4,6 +4,8 @@ import argparse
 import json
 import os
 import sys
+import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -29,6 +31,14 @@ from agentflow.config import (
 )
 from agentflow.services.db_migrations import apply_sql_migrations
 from agentflow.services.agent_registry import register_agent
+from agentflow.services.agent_queries import (
+    AgentDetail,
+    AgentSummary,
+    AgentVersionSummary,
+    get_registered_agent,
+    list_agent_versions,
+    list_registered_agents,
+)
 from agentflow.services.yaml_loader import AgentYamlError, load_agent_document, normalize_agent_config
 
 DEFAULT_LOCAL_DATABASE_NAME = "flow_agent"
@@ -56,7 +66,7 @@ def _add_agent_file_command(
 def build_parser(prog: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=prog,
-        description="Validate agent YAML files, register them in Postgres, and manage DB config.",
+        description="Validate agent YAML files, register and inspect agents in Postgres, and manage DB config.",
     )
     subparsers = parser.add_subparsers(dest="command")
 
@@ -66,6 +76,14 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
         ("register", "Validate an agent YAML file and register it in Postgres."),
     ):
         _add_agent_file_command(subparsers, command_name=command_name, help_text=help_text)
+
+    subparsers.add_parser("list", help="List registered agents.")
+
+    show_parser = subparsers.add_parser("show", help="Show one registered agent.")
+    show_parser.add_argument("agent_id", help="UUID of the agent to display.")
+
+    versions_parser = subparsers.add_parser("versions", help="List versions for one registered agent.")
+    versions_parser.add_argument("agent_id", help="UUID of the agent whose versions should be displayed.")
 
     db_parser = subparsers.add_parser("db", help="Database configuration helpers.")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
@@ -232,6 +250,142 @@ def apply_env_values(values: dict[str, str | None]) -> None:
         os.environ[key] = value
 
 
+def parse_agent_id(value: str) -> uuid.UUID:
+    try:
+        return uuid.UUID(value)
+    except ValueError as exc:
+        raise ValueError(f"Invalid agent_id '{value}'. Expected a UUID.") from exc
+
+
+def format_timestamp(value: datetime) -> str:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def summarize_text(value: str | None, *, fallback: str = "-", width: int | None = None) -> str:
+    if value is None:
+        return fallback
+
+    collapsed = " ".join(value.split())
+    if not collapsed:
+        return fallback
+
+    if width is not None and len(collapsed) > width:
+        return f"{collapsed[: max(width - 3, 0)].rstrip()}..."
+
+    return collapsed
+
+
+def print_key_value(key: str, value: object) -> None:
+    print(f"{key}: {value}")
+
+
+def render_table(headers: Sequence[str], rows: Sequence[Sequence[object]]) -> str:
+    string_rows = [[str(cell) for cell in row] for row in rows]
+    widths = [len(header) for header in headers]
+
+    for row in string_rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    header_line = "  ".join(header.ljust(widths[index]) for index, header in enumerate(headers))
+    separator_line = "  ".join("-" * widths[index] for index in range(len(headers)))
+    body_lines = [
+        "  ".join(cell.ljust(widths[index]) for index, cell in enumerate(row))
+        for row in string_rows
+    ]
+    return "\n".join([header_line, separator_line, *body_lines])
+
+
+def print_agent_table(agents: Sequence[AgentSummary]) -> None:
+    rows = [
+        (
+            agent.agent_id,
+            agent.name,
+            summarize_text(agent.description, width=50),
+            format_timestamp(agent.created_at),
+            agent.latest_version.version_number if agent.latest_version is not None else "-",
+        )
+        for agent in agents
+    ]
+    print(
+        render_table(
+            ("agent_id", "name", "description", "created_at", "latest_version"),
+            rows,
+        )
+    )
+
+
+def print_versions_table(versions: Sequence[AgentVersionSummary]) -> None:
+    rows = [
+        (
+            version.version_id,
+            version.version_number,
+            version.config_hash,
+            format_timestamp(version.created_at),
+        )
+        for version in versions
+    ]
+    print(render_table(("version_id", "version_number", "config_hash", "created_at"), rows))
+
+
+def print_agent_detail(agent: AgentDetail) -> None:
+    print_key_value("agent_id", agent.agent_id)
+    print_key_value("name", agent.name)
+    print_key_value("description", summarize_text(agent.description))
+    print_key_value("created_at", format_timestamp(agent.created_at))
+    print_key_value("updated_at", format_timestamp(agent.updated_at))
+
+    print()
+    print("latest_version:")
+    if agent.latest_version is None:
+        print("  none")
+        return
+
+    print(f"  version_id: {agent.latest_version.version_id}")
+    print(f"  version_number: {agent.latest_version.version_number}")
+    print(f"  config_hash: {agent.latest_version.config_hash}")
+    print(f"  created_at: {format_timestamp(agent.latest_version.created_at)}")
+
+
+def format_database_error_message(exc: SQLAlchemyError) -> str:
+    original = getattr(exc, "orig", None)
+    if original is not None:
+        return str(original)
+
+    return str(exc)
+
+
+def handle_agent_query_error(exc: Exception, *, action: str) -> int:
+    if isinstance(exc, ValueError):
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    if isinstance(exc, ConfigurationError):
+        print(f"{action} failed: missing configuration.", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+        return 1
+
+    if isinstance(exc, SQLAlchemyError):
+        print(f"{action} failed due to a database error.", file=sys.stderr)
+        print(f"- {format_database_error_message(exc)}", file=sys.stderr)
+
+        if isinstance(exc, OperationalError):
+            print(
+                "- Verify DATABASE_URL or your DATABASE_HOST/DATABASE_PORT settings point to a reachable Postgres instance.",
+                file=sys.stderr,
+            )
+        elif isinstance(exc, ProgrammingError):
+            print("- Verify the schema exists by running `agentflow db migrate`.", file=sys.stderr)
+
+        return 1
+
+    print(f"{action} failed.", file=sys.stderr)
+    print(f"- {exc}", file=sys.stderr)
+    return 1
+
+
 def run_db_show(as_json: bool) -> int:
     try:
         settings = get_settings()
@@ -334,7 +488,7 @@ def run_db_migrate() -> int:
         return 1
     except SQLAlchemyError as exc:
         print("Database migration failed due to a database error.", file=sys.stderr)
-        print(f"- {exc}", file=sys.stderr)
+        print(f"- {format_database_error_message(exc)}", file=sys.stderr)
 
         if isinstance(exc, OperationalError):
             print(
@@ -407,7 +561,7 @@ def run_register(path: Path) -> int:
         return 1
     except SQLAlchemyError as exc:
         print("Registration failed due to a database error.", file=sys.stderr)
-        print(f"- {exc}", file=sys.stderr)
+        print(f"- {format_database_error_message(exc)}", file=sys.stderr)
 
         if isinstance(exc, OperationalError):
             print(
@@ -427,6 +581,57 @@ def run_register(path: Path) -> int:
     return 0
 
 
+def run_list_agents() -> int:
+    try:
+        agents = list_registered_agents()
+    except Exception as exc:
+        return handle_agent_query_error(exc, action="List agents")
+
+    if not agents:
+        print("No registered agents found.")
+        return 0
+
+    print_agent_table(agents)
+    return 0
+
+
+def run_show_agent(agent_id_text: str) -> int:
+    try:
+        agent_id = parse_agent_id(agent_id_text)
+        agent = get_registered_agent(agent_id)
+    except Exception as exc:
+        return handle_agent_query_error(exc, action="Show agent")
+
+    if agent is None:
+        print(f"Agent not found: {agent_id}", file=sys.stderr)
+        return 1
+
+    print_agent_detail(agent)
+    return 0
+
+
+def run_list_agent_versions(agent_id_text: str) -> int:
+    try:
+        agent_id = parse_agent_id(agent_id_text)
+        versions = list_agent_versions(agent_id)
+    except Exception as exc:
+        return handle_agent_query_error(exc, action="List agent versions")
+
+    if versions is None:
+        print(f"Agent not found: {agent_id}", file=sys.stderr)
+        return 1
+
+    print_key_value("agent_id", agent_id)
+    print()
+
+    if not versions:
+        print("No versions found.")
+        return 0
+
+    print_versions_table(versions)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser(prog=Path(sys.argv[0]).name)
@@ -436,6 +641,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_validate(args.path)
     if args.command == "register":
         return run_register(args.path)
+    if args.command == "list":
+        return run_list_agents()
+    if args.command == "show":
+        return run_show_agent(args.agent_id)
+    if args.command == "versions":
+        return run_list_agent_versions(args.agent_id)
     if args.command == "db":
         if args.db_command == "show":
             return run_db_show(args.json)

@@ -1,6 +1,6 @@
 # AgentFlow
 
-Phase 2 adds Postgres-backed agent registration on top of the Phase 1 YAML validation CLI, using strict checked-in SQL migration files with lightweight tracking in `schema_migrations`.
+Phase 3 adds Postgres-backed read access on top of the Phase 2 registration flow, still using strict checked-in SQL migration files with lightweight tracking in `schema_migrations`.
 
 ## Install
 
@@ -59,6 +59,30 @@ The CLI prints a short success message followed by normalized JSON.
 ```
 
 The command validates the YAML, inserts one logical agent row plus one immutable version row, and prints the generated IDs and config hash.
+
+## List registered agents
+
+```bash
+.venv/bin/agentflow list
+```
+
+The command prints one row per logical agent, ordered newest first, including the latest version number when available.
+
+## Show one agent
+
+```bash
+.venv/bin/agentflow show <agent_id>
+```
+
+The command prints agent metadata plus the latest registered version summary.
+
+## Show versions for one agent
+
+```bash
+.venv/bin/agentflow versions <agent_id>
+```
+
+The command prints all known versions for that agent, ordered by highest version number first.
 
 ## Validate the invalid example
 
