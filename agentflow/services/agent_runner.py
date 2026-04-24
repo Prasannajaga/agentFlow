@@ -23,7 +23,9 @@ from agentflow.services.run_queries import (
     TERMINAL_RUN_STATUSES,
     AgentRunDetail,
     create_agent_run,
+    create_rerun_from_run,
     get_agent_execution_target,
+    get_agent_version_execution_target,
     get_agent_run,
     mark_agent_run_completed,
     mark_agent_run_failed,
@@ -39,7 +41,6 @@ from agentflow.services.run_events import (
     RUN_EVENT_PROVIDER_REQUEST_PREPARED,
     RUN_EVENT_PROVIDER_EXECUTION_STARTED,
     RUN_EVENT_RUN_COMPLETED,
-    RUN_EVENT_RUN_FAILED,
     RUN_EVENT_RUN_STARTED,
     RunEventCreate,
     record_run_event,
@@ -67,9 +68,31 @@ class AgentVersionNotFoundError(AgentRunError):
         self.agent_id = agent_id
 
 
+class AgentVersionIdNotFoundError(AgentRunError):
+    def __init__(self, version_id: uuid.UUID):
+        super().__init__(f"Agent version not found: {version_id}")
+        self.version_id = version_id
+
+
+class AgentVersionAgentMismatchError(AgentRunError):
+    def __init__(self, *, agent_id: uuid.UUID, version_id: uuid.UUID, actual_agent_id: uuid.UUID):
+        super().__init__(
+            f"Agent version {version_id} belongs to agent {actual_agent_id}, not requested agent {agent_id}."
+        )
+        self.agent_id = agent_id
+        self.version_id = version_id
+        self.actual_agent_id = actual_agent_id
+
+
 class AgentRunNotFoundError(AgentRunError):
     def __init__(self, run_id: uuid.UUID):
         super().__init__(f"Run not found: {run_id}")
+        self.run_id = run_id
+
+
+class AgentRunSnapshotMissingError(AgentRunError):
+    def __init__(self, run_id: uuid.UUID):
+        super().__init__(f"Run {run_id} is missing a usable resolved config snapshot.")
         self.run_id = run_id
 
 
@@ -88,6 +111,7 @@ class PreparedAgentRun:
 def create_run_for_agent(
     agent_id: uuid.UUID,
     *,
+    version_id: uuid.UUID | None = None,
     input_json: dict[str, Any] | None = None,
     session_factory: sessionmaker[Session] | None = None,
 ) -> PreparedAgentRun:
@@ -98,9 +122,20 @@ def create_run_for_agent(
     if agent.latest_version is None:
         raise AgentVersionNotFoundError(agent_id)
 
-    execution_target = get_agent_execution_target(agent_id, session_factory=session_factory)
-    if execution_target is None:
-        raise AgentVersionNotFoundError(agent_id)
+    if version_id is None:
+        execution_target = get_agent_execution_target(agent_id, session_factory=session_factory)
+        if execution_target is None:
+            raise AgentVersionNotFoundError(agent_id)
+    else:
+        execution_target = get_agent_version_execution_target(version_id, session_factory=session_factory)
+        if execution_target is None:
+            raise AgentVersionIdNotFoundError(version_id)
+        if execution_target.agent_id != agent_id:
+            raise AgentVersionAgentMismatchError(
+                agent_id=agent_id,
+                version_id=version_id,
+                actual_agent_id=execution_target.agent_id,
+            )
 
     run = create_agent_run(
         agent_id=execution_target.agent_id,
@@ -111,6 +146,22 @@ def create_run_for_agent(
     )
 
     return PreparedAgentRun(run=run)
+
+
+def rerun_agent_run(
+    run_id: uuid.UUID,
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+) -> PreparedAgentRun:
+    try:
+        rerun = create_rerun_from_run(run_id, session_factory=session_factory)
+    except ValueError as exc:
+        raise AgentRunSnapshotMissingError(run_id) from exc
+
+    if rerun is None:
+        raise AgentRunNotFoundError(run_id)
+
+    return PreparedAgentRun(run=rerun)
 
 
 def execute_agent_run(
@@ -227,6 +278,7 @@ def execute_claimed_run(
         failed_run = mark_agent_run_failed(
             run.run_id,
             error_message=str(exc),
+            last_error_type=exc.error_type,
             events=(
                 RunEventCreate(
                     event_type=RUN_EVENT_TOOL_EXECUTION_FAILED,
@@ -235,14 +287,6 @@ def execute_claimed_run(
                         "tool_name": exc.tool_name,
                         "error_type": exc.error_type,
                         "message": str(exc),
-                    },
-                ),
-                RunEventCreate(
-                    event_type=RUN_EVENT_RUN_FAILED,
-                    message="Run failed during execution.",
-                    payload_json={
-                        "tool_name": exc.tool_name,
-                        "error_message": str(exc),
                     },
                 ),
             ),
@@ -256,6 +300,7 @@ def execute_claimed_run(
         failed_run = mark_agent_run_failed(
             run.run_id,
             error_message=str(exc),
+            last_error_type=exc.error_type,
             events=(
                 RunEventCreate(
                     event_type=RUN_EVENT_PROVIDER_EXECUTION_FAILED,
@@ -264,14 +309,6 @@ def execute_claimed_run(
                         "provider_type": exc.provider_type,
                         "error_type": exc.error_type,
                         "message": str(exc),
-                    },
-                ),
-                RunEventCreate(
-                    event_type=RUN_EVENT_RUN_FAILED,
-                    message="Run failed during execution.",
-                    payload_json={
-                        "provider_type": exc.provider_type,
-                        "error_message": str(exc),
                     },
                 ),
             ),
@@ -290,6 +327,7 @@ def execute_claimed_run(
         failed_run = mark_agent_run_failed(
             run.run_id,
             error_message=str(provider_error),
+            last_error_type=provider_error.error_type,
             events=(
                 RunEventCreate(
                     event_type=RUN_EVENT_PROVIDER_EXECUTION_FAILED,
@@ -298,14 +336,6 @@ def execute_claimed_run(
                         "provider_type": provider_error.provider_type,
                         "error_type": provider_error.error_type,
                         "message": str(provider_error),
-                    },
-                ),
-                RunEventCreate(
-                    event_type=RUN_EVENT_RUN_FAILED,
-                    message="Run failed during execution.",
-                    payload_json={
-                        "provider_type": provider_error.provider_type,
-                        "error_message": str(provider_error),
                     },
                 ),
             ),

@@ -33,8 +33,13 @@ from agentflow.services.db_migrations import apply_sql_migrations
 from agentflow.services.agent_registry import register_agent
 from agentflow.services.agent_runner import (
     AgentNotFoundError,
+    AgentRunNotFoundError,
+    AgentRunSnapshotMissingError,
+    AgentVersionAgentMismatchError,
+    AgentVersionIdNotFoundError,
     AgentVersionNotFoundError,
     create_run_for_agent,
+    rerun_agent_run,
 )
 from agentflow.services.agent_queries import (
     AgentDetail,
@@ -96,9 +101,16 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     run_parser = subparsers.add_parser("run", help="Create one pending agent run for background execution.")
     run_parser.add_argument("agent_id", help="UUID of the agent to run.")
     run_parser.add_argument(
+        "--version-id",
+        help="Optional UUID of the exact registered agent version to run.",
+    )
+    run_parser.add_argument(
         "--input-json",
         help="Optional JSON object to store with the run and make available during execution.",
     )
+
+    rerun_parser = subparsers.add_parser("rerun", help="Create a fresh run from an existing run snapshot.")
+    rerun_parser.add_argument("run_id", help="UUID of the source run to rerun.")
 
     subparsers.add_parser("runs", help="List agent runs.")
 
@@ -283,6 +295,10 @@ def parse_run_id(value: str) -> uuid.UUID:
     return parse_uuid_value(value, label="run_id")
 
 
+def parse_version_id(value: str) -> uuid.UUID:
+    return parse_uuid_value(value, label="version_id")
+
+
 def parse_uuid_value(value: str, *, label: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
@@ -392,14 +408,34 @@ def print_runs_table(runs: Sequence[AgentRunSummary]) -> None:
         (
             run.run_id,
             run.agent_id,
+            run.version_id,
+            run.source_run_id or "-",
             run.status,
+            f"{run.attempt_count}/{run.max_attempts}",
+            run.retryable,
             format_timestamp(run.created_at),
             format_optional_timestamp(run.started_at),
             format_optional_timestamp(run.ended_at),
         )
         for run in runs
     ]
-    print(render_table(("run_id", "agent_id", "status", "created_at", "started_at", "ended_at"), rows))
+    print(
+        render_table(
+            (
+                "run_id",
+                "agent_id",
+                "version_id",
+                "source_run_id",
+                "status",
+                "attempts",
+                "retryable",
+                "created_at",
+                "started_at",
+                "ended_at",
+            ),
+            rows,
+        )
+    )
 
 
 def print_agent_detail(agent: AgentDetail) -> None:
@@ -425,7 +461,14 @@ def print_run_summary(run: AgentRunDetail, *, file: IO[str] = sys.stdout) -> Non
     print_key_value("run_id", run.run_id, file=file)
     print_key_value("agent_id", run.agent_id, file=file)
     print_key_value("version_id", run.version_id, file=file)
+    print_key_value("source_run_id", run.source_run_id or "-", file=file)
+    print_key_value("snapshot_provider", summarize_snapshot_provider(run.resolved_config_json), file=file)
+    print_key_value("snapshot_tools", summarize_snapshot_tools(run.resolved_config_json), file=file)
     print_key_value("status", run.status, file=file)
+    print_key_value("attempt_count", run.attempt_count, file=file)
+    print_key_value("max_attempts", run.max_attempts, file=file)
+    print_key_value("retryable", run.retryable, file=file)
+    print_key_value("last_error_type", run.last_error_type or "-", file=file)
     print_key_value("created_at", format_timestamp(run.created_at), file=file)
     print_key_value("started_at", format_optional_timestamp(run.started_at), file=file)
     print_key_value("ended_at", format_optional_timestamp(run.ended_at), file=file)
@@ -469,6 +512,25 @@ def summarize_run_output(output_json: dict[str, object] | None) -> str:
         parts.append(summarize_text(str(message), width=60))
 
     return " | ".join(parts) or "stored"
+
+
+def summarize_snapshot_provider(resolved_config_json: dict[str, object]) -> str:
+    provider = resolved_config_json.get("provider")
+    if not isinstance(provider, dict):
+        return "-"
+
+    provider_type = provider.get("type")
+    model = provider.get("model")
+    parts = [str(part) for part in (provider_type, model) if part]
+    return " | ".join(parts) or "-"
+
+
+def summarize_snapshot_tools(resolved_config_json: dict[str, object]) -> str:
+    tools = resolved_config_json.get("tools")
+    if not isinstance(tools, list) or not tools:
+        return "-"
+
+    return ", ".join(str(tool) for tool in tools)
 
 
 def format_payload_json(payload_json: dict[str, object] | None) -> str:
@@ -776,15 +838,27 @@ def run_list_agent_versions(agent_id_text: str) -> int:
     return 0
 
 
-def run_run_agent(agent_id_text: str, *, input_json_text: str | None = None) -> int:
+def run_run_agent(
+    agent_id_text: str,
+    *,
+    version_id_text: str | None = None,
+    input_json_text: str | None = None,
+) -> int:
     try:
         agent_id = parse_agent_id(agent_id_text)
+        version_id = parse_version_id(version_id_text) if version_id_text is not None else None
         input_json = parse_optional_json_object(input_json_text, label="input_json")
-        prepared_run = create_run_for_agent(agent_id, input_json=input_json)
+        prepared_run = create_run_for_agent(agent_id, version_id=version_id, input_json=input_json)
     except AgentNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except AgentVersionNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AgentVersionIdNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AgentVersionAgentMismatchError as exc:
         print(str(exc), file=sys.stderr)
         return 1
     except Exception as exc:
@@ -793,6 +867,25 @@ def run_run_agent(agent_id_text: str, *, input_json_text: str | None = None) -> 
     print("Run created")
     print_run_summary(prepared_run.run)
     print_key_value("message", "Run is pending and will be picked up by a worker.")
+    return 0
+
+
+def run_rerun_agent(run_id_text: str) -> int:
+    try:
+        run_id = parse_run_id(run_id_text)
+        prepared_run = rerun_agent_run(run_id)
+    except AgentRunNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AgentRunSnapshotMissingError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Rerun")
+
+    print("Rerun created")
+    print_run_summary(prepared_run.run)
+    print_key_value("message", "Rerun is pending and will be picked up by a worker.")
     return 0
 
 
@@ -874,7 +967,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "versions":
         return run_list_agent_versions(args.agent_id)
     if args.command == "run":
-        return run_run_agent(args.agent_id, input_json_text=args.input_json)
+        return run_run_agent(
+            args.agent_id,
+            version_id_text=args.version_id,
+            input_json_text=args.input_json,
+        )
+    if args.command == "rerun":
+        return run_rerun_agent(args.run_id)
     if args.command == "runs":
         return run_list_runs()
     if args.command == "run-show":

@@ -22,7 +22,7 @@ class ProviderConfig(StrictModel):
 
 
 class RetryConfig(StrictModel):
-    max_attempts: NonNegativeInt = 0
+    max_attempts: PositiveInt = 1
     backoff_seconds: NonNegativeInt = 0
 
 

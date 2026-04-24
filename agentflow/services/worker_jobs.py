@@ -47,7 +47,10 @@ def start_worker_loop(
             time.sleep(poll_interval_seconds)
             continue
 
-        print(f"Picked run {claimed_run.run_id}")
+        print(
+            f"Picked run {claimed_run.run_id} "
+            f"attempt={claimed_run.attempt_count}/{claimed_run.max_attempts}"
+        )
 
         try:
             completed_run = execute_claimed_run(
@@ -67,7 +70,10 @@ def start_worker_loop(
             print(f"run_id={claimed_run.run_id} unexpected worker error: {exc}", file=sys.stderr)
             continue
 
-        print(f"run_id={completed_run.run_id} status={completed_run.status}")
+        print(
+            f"run_id={completed_run.run_id} status={completed_run.status} "
+            f"attempt={completed_run.attempt_count}/{completed_run.max_attempts}"
+        )
 
 
 def ensure_worker_database_ready(session_factory: sessionmaker[Session]) -> None:

@@ -1,0 +1,34 @@
+name: text-agent-retry
+version: 1
+description: Simple fake-provider agent with explicit retry settings
+
+provider:
+  type: fake
+  model: stub-model
+
+system_prompt: |
+  You are a focused research agent.
+
+runtime:
+  max_steps: 12
+  timeout_seconds: 900
+  retry:
+    max_attempts: 3
+    backoff_seconds: 0
+
+tools: []
+
+task:
+  type: research
+  input_schema:
+    topic: string
+    depth: string
+
+telemetry:
+  trace_enabled: true
+  log_level: info
+  store_prompts: true
+
+outputs:
+  save_final_text: true
+  save_artifacts: true

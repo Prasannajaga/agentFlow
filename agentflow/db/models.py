@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -76,11 +76,20 @@ class AgentRun(Base):
         ForeignKey("agent_versions.id"),
         nullable=False,
     )
+    source_run_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("agent_runs.id"),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     input_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     resolved_config_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
     output_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_type: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    retryable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
