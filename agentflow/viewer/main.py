@@ -28,11 +28,37 @@ from agentflow.services.agent_queries import (
     list_agent_versions,
     list_registered_agents,
 )
+from agentflow.services.label_service import (
+    LabelDuplicateError,
+    LabelInvalidError,
+    LabelTargetNotFoundError,
+    add_run_label,
+    add_version_label,
+    list_run_labels,
+    list_run_labels_for_runs,
+    list_version_labels_for_versions,
+    remove_run_label,
+    remove_version_label,
+)
+from agentflow.services.preset_service import (
+    PresetAgentNotFoundError,
+    PresetDuplicateError,
+    PresetInvalidError,
+    PresetNotFoundError,
+    create_input_preset,
+    list_input_presets,
+    run_from_preset,
+)
 from agentflow.services.run_actions import (
     RunActionNotFoundError,
     RunRetryNotEligibleError,
     get_manual_retry_eligibility,
     manual_retry_run,
+)
+from agentflow.services.run_compare import (
+    RunCompareInvalidError,
+    RunCompareNotFoundError,
+    compare_runs,
 )
 from agentflow.services.run_events import RunEventRecord, list_run_events
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
@@ -143,12 +169,85 @@ async def register_agent_version_action(request: Request, agent_id: str) -> Any:
     )
 
 
+@app.post("/agents/{agent_id}/versions/{version_id}/labels")
+async def add_version_label_action(request: Request, agent_id: str, version_id: str) -> Any:
+    parsed_agent_id = _parse_uuid(agent_id)
+    parsed_version_id = _parse_uuid(version_id)
+    if parsed_agent_id is None or parsed_version_id is None:
+        return _not_found(request, "Agent version not found")
+
+    label = _form_value_from_body(await request.body(), "label")
+    try:
+        add_version_label(parsed_version_id, label)
+    except LabelTargetNotFoundError:
+        return _not_found(request, "Agent version not found")
+    except (LabelInvalidError, LabelDuplicateError) as exc:
+        return _redirect_to_agent(parsed_agent_id, error=str(exc))
+
+    return _redirect_to_agent(parsed_agent_id, message="Version label added")
+
+
+@app.post("/agents/{agent_id}/versions/{version_id}/labels/remove")
+async def remove_version_label_action(request: Request, agent_id: str, version_id: str) -> Any:
+    parsed_agent_id = _parse_uuid(agent_id)
+    parsed_version_id = _parse_uuid(version_id)
+    if parsed_agent_id is None or parsed_version_id is None:
+        return _not_found(request, "Agent version not found")
+
+    label = _form_value_from_body(await request.body(), "label")
+    try:
+        remove_version_label(parsed_version_id, label)
+    except LabelTargetNotFoundError:
+        return _not_found(request, "Agent version not found")
+    except LabelInvalidError as exc:
+        return _redirect_to_agent(parsed_agent_id, error=str(exc))
+
+    return _redirect_to_agent(parsed_agent_id, message="Version label removed")
+
+
+@app.post("/agents/{agent_id}/presets")
+async def create_preset_action(request: Request, agent_id: str) -> Any:
+    parsed_agent_id = _parse_uuid(agent_id)
+    if parsed_agent_id is None:
+        return _not_found(request, "Agent not found")
+
+    form = _form_values_from_body(await request.body())
+    name = form.get("name", "")
+    description = form.get("description", "")
+    input_json_text = form.get("input_json", "")
+    try:
+        input_json = _parse_json_object(input_json_text, label="input_json")
+        create_input_preset(
+            parsed_agent_id,
+            name=name,
+            description=description,
+            input_json=input_json,
+        )
+    except PresetAgentNotFoundError:
+        return _not_found(request, "Agent not found")
+    except (PresetInvalidError, PresetDuplicateError, ValueError) as exc:
+        return _render_agent_detail_page(
+            request,
+            parsed_agent_id,
+            feedback={"message": None, "error": str(exc)},
+            submitted_preset={
+                "name": name,
+                "description": description,
+                "input_json": input_json_text,
+            },
+            status_code=400,
+        )
+
+    return _redirect_to_agent(parsed_agent_id, message="Input preset created")
+
+
 def _render_agent_detail_page(
     request: Request,
     agent_id: uuid.UUID,
     *,
     feedback: dict[str, str | None] | None = None,
     submitted_yaml: str = "",
+    submitted_preset: dict[str, str] | None = None,
     status_code: int = 200,
 ) -> HTMLResponse:
     agent = get_registered_agent(agent_id)
@@ -163,6 +262,13 @@ def _render_agent_detail_page(
         }
         for version in (list_agent_versions(agent_id) or [])
     ]
+    version_labels = list_version_labels_for_versions([
+        uuid.UUID(version["version_id"]) for version in versions
+    ])
+    for version in versions:
+        version["labels"] = version_labels.get(uuid.UUID(version["version_id"]), [])
+
+    presets = list_input_presets(agent_id) or []
     return templates.TemplateResponse(
         request,
         "agent_detail.html",
@@ -170,8 +276,10 @@ def _render_agent_detail_page(
             "page_title": "Agent Detail",
             "agent": _agent_detail_to_view(agent),
             "versions": versions,
+            "presets": [_preset_to_view(preset) for preset in presets],
             "feedback": feedback or _feedback_from_request(request),
             "submitted_yaml": submitted_yaml,
+            "submitted_preset": submitted_preset or {"name": "", "description": "", "input_json": ""},
         },
         status_code=status_code,
     )
@@ -183,10 +291,34 @@ def runs_index(
     limit: int = Query(DEFAULT_RUN_LIMIT, ge=1, le=MAX_RUN_LIMIT),
 ) -> HTMLResponse:
     runs = [_run_summary_to_view(run) for run in list_agent_runs(limit=limit)]
+    labels_by_run = list_run_labels_for_runs([uuid.UUID(run["run_id"]) for run in runs])
+    for run in runs:
+        run["labels"] = labels_by_run.get(uuid.UUID(run["run_id"]), [])
     return templates.TemplateResponse(
         request,
         "runs.html",
         {"page_title": "Runs", "runs": runs, "limit": limit},
+    )
+
+
+@app.get("/runs/compare", response_class=HTMLResponse)
+def compare_runs_page(request: Request, run_ids: str = "") -> HTMLResponse:
+    parsed_run_ids = [run_id for run_id in (_parse_uuid(value.strip()) for value in run_ids.split(",")) if run_id]
+    try:
+        comparison = compare_runs(parsed_run_ids)
+    except RunCompareNotFoundError as exc:
+        return _not_found(request, str(exc))
+    except RunCompareInvalidError as exc:
+        return _error_page(request, status_code=400, title="Comparison Error", message=str(exc))
+
+    return templates.TemplateResponse(
+        request,
+        "run_compare.html",
+        {
+            "page_title": "Compare Runs",
+            "agent_id": str(comparison.agent_id),
+            "runs": [_comparable_run_to_view(item) for item in comparison.runs],
+        },
     )
 
 
@@ -209,6 +341,7 @@ def run_detail(request: Request, run_id: str) -> HTMLResponse:
             "page_title": "Run Detail",
             "run": _run_detail_to_view(run),
             "events": [_run_event_to_view(event) for event in events],
+            "labels": [record.label for record in list_run_labels(parsed_run_id)],
             "feedback": _feedback_from_request(request),
             "can_rerun": bool(run.resolved_config_json),
             "retry_eligible": retry_eligibility.eligible,
@@ -247,6 +380,48 @@ def retry_action(request: Request, run_id: str) -> Any:
         return _redirect_to_run(parsed_run_id, error=exc.reason)
 
     return _redirect_to_run(retried_run.run_id, message="Run queued for retry")
+
+
+@app.post("/runs/{run_id}/labels")
+async def add_run_label_action(request: Request, run_id: str) -> Any:
+    parsed_run_id = _parse_uuid(run_id)
+    if parsed_run_id is None:
+        return _not_found(request, "Run not found")
+    label = _form_value_from_body(await request.body(), "label")
+    try:
+        add_run_label(parsed_run_id, label)
+    except LabelTargetNotFoundError:
+        return _not_found(request, "Run not found")
+    except (LabelInvalidError, LabelDuplicateError) as exc:
+        return _redirect_to_run(parsed_run_id, error=str(exc))
+    return _redirect_to_run(parsed_run_id, message="Run label added")
+
+
+@app.post("/runs/{run_id}/labels/remove")
+async def remove_run_label_action(request: Request, run_id: str) -> Any:
+    parsed_run_id = _parse_uuid(run_id)
+    if parsed_run_id is None:
+        return _not_found(request, "Run not found")
+    label = _form_value_from_body(await request.body(), "label")
+    try:
+        remove_run_label(parsed_run_id, label)
+    except LabelTargetNotFoundError:
+        return _not_found(request, "Run not found")
+    except LabelInvalidError as exc:
+        return _redirect_to_run(parsed_run_id, error=str(exc))
+    return _redirect_to_run(parsed_run_id, message="Run label removed")
+
+
+@app.post("/presets/{preset_id}/run")
+def run_preset_action(request: Request, preset_id: str) -> Any:
+    parsed_preset_id = _parse_uuid(preset_id)
+    if parsed_preset_id is None:
+        return _not_found(request, "Preset not found")
+    try:
+        prepared_run = run_from_preset(parsed_preset_id)
+    except PresetNotFoundError:
+        return _not_found(request, "Preset not found")
+    return _redirect_to_run(prepared_run.run.run_id, message="Run created from preset")
 
 
 def stats_to_view(stats: DashboardStats) -> dict[str, int]:
@@ -346,6 +521,25 @@ def _run_event_to_view(event: RunEventRecord) -> dict[str, Any]:
     }
 
 
+def _preset_to_view(preset: Any) -> dict[str, Any]:
+    return {
+        "preset_id": str(preset.preset_id),
+        "agent_id": str(preset.agent_id),
+        "name": preset.name,
+        "description": preset.description,
+        "input_json": _format_json(preset.input_json),
+        "input_preview": _summarize_json(preset.input_json),
+        "created_at": _format_datetime(preset.created_at),
+        "updated_at": _format_datetime(preset.updated_at),
+    }
+
+
+def _comparable_run_to_view(item: Any) -> dict[str, Any]:
+    run = _run_detail_to_view(item.run)
+    run["event_count"] = item.event_count
+    return run
+
+
 def _summarize_run_output(output_json: dict[str, Any] | None) -> str | None:
     if output_json is None:
         return None
@@ -357,6 +551,13 @@ def _summarize_run_output(output_json: dict[str, Any] | None) -> str | None:
             parts.append(str(value))
 
     return " | ".join(parts[:3]) if parts else "stored"
+
+
+def _summarize_json(value: dict[str, Any] | None) -> str:
+    if value is None:
+        return "-"
+    text = json.dumps(value, sort_keys=True)
+    return text if len(text) <= 80 else f"{text[:77]}..."
 
 
 def _format_json(value: Any) -> str:
@@ -381,9 +582,22 @@ def _parse_uuid(value: str) -> uuid.UUID | None:
 
 
 def _form_value_from_body(body: bytes, key: str) -> str:
+    return _form_values_from_body(body).get(key, "")
+
+
+def _form_values_from_body(body: bytes) -> dict[str, str]:
     form_values = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
-    values = form_values.get(key)
-    return values[0] if values else ""
+    return {key: values[0] if values else "" for key, values in form_values.items()}
+
+
+def _parse_json_object(value: str, *, label: str) -> dict[str, Any]:
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid {label}: {exc.msg}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Invalid {label}: expected a JSON object.")
+    return parsed
 
 
 def _format_validation_errors(exc: ValidationError) -> str:

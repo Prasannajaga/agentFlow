@@ -17,6 +17,7 @@
         <th>Version ID</th>
         <th>Source Run</th>
         <th>Attempts</th>
+        <th>Labels</th>
         <th>Created</th>
         <th>Started</th>
         <th>Ended</th>
@@ -31,6 +32,13 @@
         <td><code>{{ run.version_id }}</code></td>
         <td>{% if run.source_run_id %}<a href="/runs/{{ run.source_run_id }}"><code>{{ run.source_run_id }}</code></a>{% else %}-{% endif %}</td>
         <td>{{ run.attempt_count }}/{{ run.max_attempts }}</td>
+        <td>
+          <div class="labels">
+          {% for label in run.labels %}
+            <span class="label-chip static">{{ label }}</span>
+          {% endfor %}
+          </div>
+        </td>
         <td>{{ run.created_at }}</td>
         <td>{{ run.started_at }}</td>
         <td>{{ run.ended_at }}</td>

@@ -49,6 +49,28 @@ from agentflow.services.agent_queries import (
     list_agent_versions,
     list_registered_agents,
 )
+from agentflow.services.label_service import (
+    LabelDuplicateError,
+    LabelInvalidError,
+    LabelTargetNotFoundError,
+    add_run_label,
+    add_version_label,
+    list_run_labels,
+    list_version_labels,
+    remove_run_label,
+    remove_version_label,
+)
+from agentflow.services.preset_service import (
+    InputPresetRecord,
+    PresetAgentNotFoundError,
+    PresetDuplicateError,
+    PresetInvalidError,
+    PresetNotFoundError,
+    create_input_preset,
+    get_input_preset,
+    list_input_presets,
+    run_from_preset,
+)
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.run_events import RunEventRecord, RunEventSummary, get_run_event_summary, list_run_events
 from agentflow.services.worker_jobs import start_worker_loop
@@ -125,6 +147,38 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
 
     run_events_parser = subparsers.add_parser("run-events", help="Show the persisted event timeline for one run.")
     run_events_parser.add_argument("run_id", help="UUID of the run whose events should be displayed.")
+
+    run_label_parser = subparsers.add_parser("run-label", help="Add or remove labels on runs.")
+    run_label_subparsers = run_label_parser.add_subparsers(dest="label_command", required=True)
+    run_label_add = run_label_subparsers.add_parser("add", help="Add a label to a run.")
+    run_label_add.add_argument("run_id", help="UUID of the run to label.")
+    run_label_add.add_argument("label", help="Label to add.")
+    run_label_remove = run_label_subparsers.add_parser("remove", help="Remove a label from a run.")
+    run_label_remove.add_argument("run_id", help="UUID of the run to update.")
+    run_label_remove.add_argument("label", help="Label to remove.")
+
+    version_label_parser = subparsers.add_parser("version-label", help="Add or remove labels on agent versions.")
+    version_label_subparsers = version_label_parser.add_subparsers(dest="label_command", required=True)
+    version_label_add = version_label_subparsers.add_parser("add", help="Add a label to a version.")
+    version_label_add.add_argument("version_id", help="UUID of the version to label.")
+    version_label_add.add_argument("label", help="Label to add.")
+    version_label_remove = version_label_subparsers.add_parser("remove", help="Remove a label from a version.")
+    version_label_remove.add_argument("version_id", help="UUID of the version to update.")
+    version_label_remove.add_argument("label", help="Label to remove.")
+
+    preset_parser = subparsers.add_parser("preset", help="Manage saved agent input presets.")
+    preset_subparsers = preset_parser.add_subparsers(dest="preset_command", required=True)
+    preset_add = preset_subparsers.add_parser("add", help="Create an input preset for an agent.")
+    preset_add.add_argument("agent_id", help="UUID of the agent that owns the preset.")
+    preset_add.add_argument("--name", required=True, help="Preset name.")
+    preset_add.add_argument("--description", help="Optional preset description.")
+    preset_add.add_argument("--input-json", required=True, help="JSON object to store as preset input.")
+    preset_list = preset_subparsers.add_parser("list", help="List presets for an agent.")
+    preset_list.add_argument("agent_id", help="UUID of the agent whose presets should be listed.")
+    preset_show = preset_subparsers.add_parser("show", help="Show one input preset.")
+    preset_show.add_argument("preset_id", help="UUID of the preset to show.")
+    preset_run = preset_subparsers.add_parser("run", help="Create a pending run from an input preset.")
+    preset_run.add_argument("preset_id", help="UUID of the preset to run.")
 
     subparsers.add_parser("worker", help="Start the background run worker.")
 
@@ -310,6 +364,10 @@ def parse_version_id(value: str) -> uuid.UUID:
     return parse_uuid_value(value, label="version_id")
 
 
+def parse_preset_id(value: str) -> uuid.UUID:
+    return parse_uuid_value(value, label="preset_id")
+
+
 def parse_uuid_value(value: str, *, label: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
@@ -331,6 +389,13 @@ def parse_optional_json_object(value: str | None, *, label: str) -> dict[str, ob
     if not isinstance(parsed, dict):
         raise ValueError(f"Invalid {label}. Expected a JSON object.")
 
+    return parsed
+
+
+def parse_json_object(value: str, *, label: str) -> dict[str, object]:
+    parsed = parse_optional_json_object(value, label=label)
+    if parsed is None:
+        raise ValueError(f"Invalid {label}. Expected a JSON object.")
     return parsed
 
 
@@ -407,11 +472,12 @@ def print_versions_table(versions: Sequence[AgentVersionSummary]) -> None:
             version.version_id,
             version.version_number,
             version.config_hash,
+            ", ".join(record.label for record in list_version_labels(version.version_id)) or "-",
             format_timestamp(version.created_at),
         )
         for version in versions
     ]
-    print(render_table(("version_id", "version_number", "config_hash", "created_at"), rows))
+    print(render_table(("version_id", "version_number", "config_hash", "labels", "created_at"), rows))
 
 
 def print_runs_table(runs: Sequence[AgentRunSummary]) -> None:
@@ -424,6 +490,7 @@ def print_runs_table(runs: Sequence[AgentRunSummary]) -> None:
             run.status,
             f"{run.attempt_count}/{run.max_attempts}",
             run.retryable,
+            ", ".join(record.label for record in list_run_labels(run.run_id)) or "-",
             format_timestamp(run.created_at),
             format_optional_timestamp(run.started_at),
             format_optional_timestamp(run.ended_at),
@@ -440,6 +507,7 @@ def print_runs_table(runs: Sequence[AgentRunSummary]) -> None:
                 "status",
                 "attempts",
                 "retryable",
+                "labels",
                 "created_at",
                 "started_at",
                 "ended_at",
@@ -479,6 +547,7 @@ def print_run_summary(run: AgentRunDetail, *, file: IO[str] = sys.stdout) -> Non
     print_key_value("attempt_count", run.attempt_count, file=file)
     print_key_value("max_attempts", run.max_attempts, file=file)
     print_key_value("retryable", run.retryable, file=file)
+    print_key_value("labels", ", ".join(record.label for record in list_run_labels(run.run_id)) or "-", file=file)
     print_key_value("last_error_type", run.last_error_type or "-", file=file)
     print_key_value("created_at", format_timestamp(run.created_at), file=file)
     print_key_value("started_at", format_optional_timestamp(run.started_at), file=file)
@@ -564,6 +633,32 @@ def print_run_events(run_id: uuid.UUID, events: Sequence[RunEventRecord], *, fil
         )
         if event.payload_json is not None:
             print(f"  payload_json: {format_payload_json(event.payload_json)}", file=file)
+
+
+def print_presets_table(presets: Sequence[InputPresetRecord]) -> None:
+    rows = [
+        (
+            preset.preset_id,
+            preset.name,
+            summarize_text(preset.description, width=40),
+            summarize_text(json.dumps(preset.input_json, sort_keys=True), width=60),
+            format_timestamp(preset.created_at),
+        )
+        for preset in presets
+    ]
+    print(render_table(("preset_id", "name", "description", "input_preview", "created_at"), rows))
+
+
+def print_preset_detail(preset: InputPresetRecord) -> None:
+    print_key_value("preset_id", preset.preset_id)
+    print_key_value("agent_id", preset.agent_id)
+    print_key_value("name", preset.name)
+    print_key_value("description", summarize_text(preset.description))
+    print_key_value("created_at", format_timestamp(preset.created_at))
+    print_key_value("updated_at", format_timestamp(preset.updated_at))
+    print()
+    print("input_json:")
+    print(json.dumps(preset.input_json, indent=2, sort_keys=True))
 
 
 def format_database_error_message(exc: SQLAlchemyError) -> str:
@@ -957,6 +1052,99 @@ def run_show_run_events(run_id_text: str) -> int:
     return 0
 
 
+def run_run_label(command: str, run_id_text: str, label: str) -> int:
+    try:
+        run_id = parse_run_id(run_id_text)
+        if command == "add":
+            record = add_run_label(run_id, label)
+            print(f"Run label added: {record.label}")
+        else:
+            removed = remove_run_label(run_id, label)
+            print("Run label removed" if removed else "Run label was not present")
+        return 0
+    except LabelTargetNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except (LabelInvalidError, LabelDuplicateError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Update run label")
+
+
+def run_version_label(command: str, version_id_text: str, label: str) -> int:
+    try:
+        version_id = parse_version_id(version_id_text)
+        if command == "add":
+            record = add_version_label(version_id, label)
+            print(f"Version label added: {record.label}")
+        else:
+            removed = remove_version_label(version_id, label)
+            print("Version label removed" if removed else "Version label was not present")
+        return 0
+    except LabelTargetNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except (LabelInvalidError, LabelDuplicateError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Update version label")
+
+
+def run_preset_command(args: argparse.Namespace) -> int:
+    try:
+        if args.preset_command == "add":
+            agent_id = parse_agent_id(args.agent_id)
+            input_json = parse_json_object(args.input_json, label="input_json")
+            preset = create_input_preset(
+                agent_id,
+                name=args.name,
+                description=args.description,
+                input_json=input_json,
+            )
+            print("Preset created")
+            print_preset_detail(preset)
+            return 0
+
+        if args.preset_command == "list":
+            agent_id = parse_agent_id(args.agent_id)
+            presets = list_input_presets(agent_id)
+            if presets is None:
+                print(f"Agent not found: {agent_id}", file=sys.stderr)
+                return 1
+            if not presets:
+                print("No presets found.")
+                return 0
+            print_presets_table(presets)
+            return 0
+
+        if args.preset_command == "show":
+            preset_id = parse_preset_id(args.preset_id)
+            preset = get_input_preset(preset_id)
+            if preset is None:
+                print(f"Preset not found: {preset_id}", file=sys.stderr)
+                return 1
+            print_preset_detail(preset)
+            return 0
+
+        if args.preset_command == "run":
+            preset_id = parse_preset_id(args.preset_id)
+            prepared_run = run_from_preset(preset_id)
+            print("Run created from preset")
+            print_run_summary(prepared_run.run)
+            print_key_value("message", "Run is pending and will be picked up by a worker.")
+            return 0
+    except (PresetInvalidError, PresetDuplicateError, PresetAgentNotFoundError, PresetNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Preset command")
+
+    print("Unknown preset command.", file=sys.stderr)
+    return 1
+
+
 def run_worker() -> int:
     try:
         start_worker_loop()
@@ -1010,6 +1198,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_show_run(args.run_id)
     if args.command == "run-events":
         return run_show_run_events(args.run_id)
+    if args.command == "run-label":
+        return run_run_label(args.label_command, args.run_id, args.label)
+    if args.command == "version-label":
+        return run_version_label(args.label_command, args.version_id, args.label)
+    if args.command == "preset":
+        return run_preset_command(args)
     if args.command == "worker":
         return run_worker()
     if args.command == "view":

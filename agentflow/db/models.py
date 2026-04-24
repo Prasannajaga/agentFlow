@@ -34,6 +34,10 @@ class AgentDefinition(Base):
         cascade="all, delete-orphan",
     )
     runs: Mapped[list["AgentRun"]] = relationship(back_populates="agent")
+    input_presets: Mapped[list["AgentInputPreset"]] = relationship(
+        back_populates="agent",
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentVersion(Base):
@@ -60,6 +64,10 @@ class AgentVersion(Base):
 
     agent: Mapped[AgentDefinition] = relationship(back_populates="versions")
     runs: Mapped[list["AgentRun"]] = relationship(back_populates="version")
+    labels: Mapped[list["VersionLabel"]] = relationship(
+        back_populates="version",
+        cascade="all, delete-orphan",
+    )
 
 
 class AgentRun(Base):
@@ -106,6 +114,10 @@ class AgentRun(Base):
         back_populates="run",
         cascade="all, delete-orphan",
     )
+    labels: Mapped[list["RunLabel"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
 
 
 class RunEvent(Base):
@@ -127,3 +139,63 @@ class RunEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
     run: Mapped[AgentRun] = relationship(back_populates="events")
+
+
+class RunLabel(Base):
+    __tablename__ = "run_labels"
+    __table_args__ = (
+        UniqueConstraint("run_id", "label", name="uq_run_labels_run_id_label"),
+        Index("ix_run_labels_label", "label"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[AgentRun] = relationship(back_populates="labels")
+
+
+class VersionLabel(Base):
+    __tablename__ = "version_labels"
+    __table_args__ = (
+        UniqueConstraint("version_id", "label", name="uq_version_labels_version_id_label"),
+        Index("ix_version_labels_label", "label"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_versions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    label: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    version: Mapped[AgentVersion] = relationship(back_populates="labels")
+
+
+class AgentInputPreset(Base):
+    __tablename__ = "agent_input_presets"
+    __table_args__ = (
+        UniqueConstraint("agent_id", "name", name="uq_agent_input_presets_agent_id_name"),
+        Index("ix_agent_input_presets_agent_id", "agent_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_definitions.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    name: Mapped[str] = mapped_column(String(120), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    input_json: Mapped[dict[str, Any]] = mapped_column(JSON, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    agent: Mapped[AgentDefinition] = relationship(back_populates="input_presets")

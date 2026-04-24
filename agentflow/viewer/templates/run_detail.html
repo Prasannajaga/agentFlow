@@ -54,6 +54,25 @@
   </dl>
 </section>
 
+<section class="panel">
+  <h2>Labels</h2>
+  <div class="labels">
+    {% for label in labels %}
+    <form method="post" action="/runs/{{ run.run_id }}/labels/remove">
+      <input type="hidden" name="label" value="{{ label }}">
+      <button class="label-chip" type="submit">{{ label }} x</button>
+    </form>
+    {% endfor %}
+    {% if not labels %}
+    <span class="empty">No labels yet.</span>
+    {% endif %}
+  </div>
+  <form class="inline-form" method="post" action="/runs/{{ run.run_id }}/labels">
+    <input class="compact-input" name="label" placeholder="baseline">
+    <button class="button button-small" type="submit">Add label</button>
+  </form>
+</section>
+
 <section class="grid-two">
   <div class="panel">
     <h2>Input JSON</h2>

@@ -40,6 +40,7 @@
           <th>Version</th>
           <th>Version ID</th>
           <th>Latest</th>
+          <th>Labels</th>
           <th>Config Hash</th>
           <th>Created</th>
         </tr>
@@ -50,6 +51,20 @@
           <td>v{{ version.version_number }}</td>
           <td><code>{{ version.version_id }}</code></td>
           <td>{% if version.is_latest %}<span class="status status-completed">latest</span>{% else %}-{% endif %}</td>
+          <td>
+            <div class="labels">
+              {% for label in version.labels %}
+              <form method="post" action="/agents/{{ agent.agent_id }}/versions/{{ version.version_id }}/labels/remove">
+                <input type="hidden" name="label" value="{{ label }}">
+                <button class="label-chip" type="submit">{{ label }} x</button>
+              </form>
+              {% endfor %}
+            </div>
+            <form class="inline-form" method="post" action="/agents/{{ agent.agent_id }}/versions/{{ version.version_id }}/labels">
+              <input class="compact-input" name="label" placeholder="label">
+              <button class="button button-small" type="submit">Add</button>
+            </form>
+          </td>
           <td><code>{{ version.config_hash }}</code></td>
           <td>{{ version.created_at }}</td>
         </tr>
@@ -60,6 +75,58 @@
   {% else %}
   <p class="empty">No versions found.</p>
   {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Input Presets</h2>
+  {% if presets %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Description</th>
+          <th>Input Preview</th>
+          <th>Created</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for preset in presets %}
+        <tr>
+          <td>{{ preset.name }}</td>
+          <td>{{ preset.description or "-" }}</td>
+          <td><code>{{ preset.input_preview }}</code></td>
+          <td>{{ preset.created_at }}</td>
+          <td>
+            <form method="post" action="/presets/{{ preset.preset_id }}/run">
+              <button class="button button-small" type="submit">Run</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No presets saved for this agent.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Create Input Preset</h2>
+  <form class="stacked-form" method="post" action="/agents/{{ agent.agent_id }}/presets">
+    <label class="field-label" for="preset_name">Name</label>
+    <input id="preset_name" name="name" value="{{ submitted_preset.name }}" placeholder="smoke">
+    <label class="field-label" for="preset_description">Description</label>
+    <input id="preset_description" name="description" value="{{ submitted_preset.description }}" placeholder="Optional">
+    <label class="field-label" for="preset_input_json">Input JSON</label>
+    <textarea id="preset_input_json" name="input_json" rows="8" spellcheck="false" placeholder='{"topic":"hello"}'>{{ submitted_preset.input_json }}</textarea>
+    <div class="action-row">
+      <button class="button" type="submit">Save preset</button>
+      <span class="hint">Preset runs use the latest agent version.</span>
+    </div>
+  </form>
 </section>
 
 <section class="panel">
