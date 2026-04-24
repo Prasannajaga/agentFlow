@@ -10,7 +10,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from agentflow.db.models import AgentDefinition, AgentVersion
 from agentflow.db.session import create_session_factory
-from agentflow.services.yaml_loader import load_agent_document, normalize_agent_config
+from agentflow.services.yaml_loader import (
+    AgentDocument,
+    load_agent_document,
+    load_agent_document_from_text,
+    normalize_agent_config,
+)
 from agentflow.utils.hashing import compute_config_hash
 
 
@@ -39,6 +44,33 @@ def register_agent(
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRegistrationResult:
     document = load_agent_document(path)
+    return register_agent_document(
+        document,
+        agent_id=agent_id,
+        session_factory=session_factory,
+    )
+
+
+def register_agent_from_yaml_text(
+    raw_yaml: str,
+    *,
+    agent_id: uuid.UUID | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+) -> AgentRegistrationResult:
+    document = load_agent_document_from_text(raw_yaml)
+    return register_agent_document(
+        document,
+        agent_id=agent_id,
+        session_factory=session_factory,
+    )
+
+
+def register_agent_document(
+    document: AgentDocument,
+    *,
+    agent_id: uuid.UUID | None = None,
+    session_factory: sessionmaker[Session] | None = None,
+) -> AgentRegistrationResult:
     normalized_config = normalize_agent_config(document.config)
     config_hash = compute_config_hash(normalized_config)
 

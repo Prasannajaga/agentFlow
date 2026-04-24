@@ -6,6 +6,13 @@
   <p>{{ agent.description or "No description." }}</p>
 </section>
 
+{% if feedback.message %}
+<div class="notice notice-success">{{ feedback.message }}</div>
+{% endif %}
+{% if feedback.error %}
+<div class="notice notice-error">{{ feedback.error }}</div>
+{% endif %}
+
 <section class="panel">
   <h2>Agent Metadata</h2>
   <dl class="meta">
@@ -53,5 +60,17 @@
   {% else %}
   <p class="empty">No versions found.</p>
   {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Register New Version</h2>
+  <form class="stacked-form" method="post" action="/agents/{{ agent.agent_id }}/versions">
+    <label class="field-label" for="yaml_text">Agent YAML</label>
+    <textarea id="yaml_text" name="yaml_text" rows="16" spellcheck="false" placeholder="Paste the next version YAML here.">{{ submitted_yaml }}</textarea>
+    <div class="action-row">
+      <button class="button" type="submit">Register version</button>
+      <span class="hint">Creates a new immutable version for this existing agent.</span>
+    </div>
+  </form>
 </section>
 {% endblock %}

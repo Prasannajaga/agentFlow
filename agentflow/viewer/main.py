@@ -5,15 +5,20 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow.config import ConfigurationError
+from agentflow.services.agent_registry import (
+    AgentRegistrationAgentNotFoundError,
+    register_agent_from_yaml_text,
+)
 from agentflow.services.agent_runner import AgentRunNotFoundError, AgentRunSnapshotMissingError, rerun_agent_run
 from agentflow.services.agent_queries import (
     AgentDetail,
@@ -23,15 +28,16 @@ from agentflow.services.agent_queries import (
     list_agent_versions,
     list_registered_agents,
 )
-from agentflow.services.run_events import RunEventRecord, list_run_events
 from agentflow.services.run_actions import (
     RunActionNotFoundError,
     RunRetryNotEligibleError,
     get_manual_retry_eligibility,
     manual_retry_run,
 )
+from agentflow.services.run_events import RunEventRecord, list_run_events
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.stats_queries import DashboardStats, get_dashboard_stats
+from agentflow.services.yaml_loader import AgentYamlError
 
 VIEWER_DIR = Path(__file__).resolve().parent
 DEFAULT_RUN_LIMIT = 50
@@ -83,7 +89,69 @@ def agent_detail(request: Request, agent_id: str) -> HTMLResponse:
     if parsed_agent_id is None:
         return _not_found(request, "Agent not found")
 
-    agent = get_registered_agent(parsed_agent_id)
+    return _render_agent_detail_page(request, parsed_agent_id)
+
+
+@app.post("/agents/{agent_id}/versions")
+async def register_agent_version_action(request: Request, agent_id: str) -> Any:
+    parsed_agent_id = _parse_uuid(agent_id)
+    if parsed_agent_id is None:
+        return _not_found(request, "Agent not found")
+
+    yaml_text = _form_value_from_body(await request.body(), "yaml_text")
+    if not yaml_text.strip():
+        return _render_agent_detail_page(
+            request,
+            parsed_agent_id,
+            feedback={"message": None, "error": "YAML is required."},
+            submitted_yaml=yaml_text,
+            status_code=400,
+        )
+
+    try:
+        result = register_agent_from_yaml_text(yaml_text, agent_id=parsed_agent_id)
+    except AgentRegistrationAgentNotFoundError:
+        return _not_found(request, "Agent not found")
+    except AgentYamlError as exc:
+        return _render_agent_detail_page(
+            request,
+            parsed_agent_id,
+            feedback={"message": None, "error": str(exc)},
+            submitted_yaml=yaml_text,
+            status_code=400,
+        )
+    except ValidationError as exc:
+        return _render_agent_detail_page(
+            request,
+            parsed_agent_id,
+            feedback={"message": None, "error": _format_validation_errors(exc)},
+            submitted_yaml=yaml_text,
+            status_code=400,
+        )
+    except ValueError as exc:
+        return _render_agent_detail_page(
+            request,
+            parsed_agent_id,
+            feedback={"message": None, "error": str(exc)},
+            submitted_yaml=yaml_text,
+            status_code=400,
+        )
+
+    return _redirect_to_agent(
+        parsed_agent_id,
+        message=f"New version registered successfully: v{result.version_number}",
+    )
+
+
+def _render_agent_detail_page(
+    request: Request,
+    agent_id: uuid.UUID,
+    *,
+    feedback: dict[str, str | None] | None = None,
+    submitted_yaml: str = "",
+    status_code: int = 200,
+) -> HTMLResponse:
+    agent = get_registered_agent(agent_id)
     if agent is None:
         return _not_found(request, "Agent not found")
 
@@ -93,7 +161,7 @@ def agent_detail(request: Request, agent_id: str) -> HTMLResponse:
             **_version_summary_to_view(version),
             "is_latest": version.version_id == latest_version_id,
         }
-        for version in (list_agent_versions(parsed_agent_id) or [])
+        for version in (list_agent_versions(agent_id) or [])
     ]
     return templates.TemplateResponse(
         request,
@@ -102,7 +170,10 @@ def agent_detail(request: Request, agent_id: str) -> HTMLResponse:
             "page_title": "Agent Detail",
             "agent": _agent_detail_to_view(agent),
             "versions": versions,
+            "feedback": feedback or _feedback_from_request(request),
+            "submitted_yaml": submitted_yaml,
         },
+        status_code=status_code,
     )
 
 
@@ -309,11 +380,40 @@ def _parse_uuid(value: str) -> uuid.UUID | None:
         return None
 
 
+def _form_value_from_body(body: bytes, key: str) -> str:
+    form_values = parse_qs(body.decode("utf-8", errors="replace"), keep_blank_values=True)
+    values = form_values.get(key)
+    return values[0] if values else ""
+
+
+def _format_validation_errors(exc: ValidationError) -> str:
+    messages: list[str] = []
+    for error in exc.errors()[:5]:
+        location = ".".join(str(part) for part in error.get("loc", ())) or "config"
+        messages.append(f"{location}: {error.get('msg', 'Invalid value')}")
+
+    remaining = len(exc.errors()) - len(messages)
+    suffix = f" ({remaining} more)" if remaining > 0 else ""
+    return f"Validation failed: {'; '.join(messages)}{suffix}"
+
+
 def _feedback_from_request(request: Request) -> dict[str, str | None]:
     return {
         "message": request.query_params.get("message"),
         "error": request.query_params.get("error"),
     }
+
+
+def _redirect_to_agent(agent_id: uuid.UUID, *, message: str | None = None, error: str | None = None) -> RedirectResponse:
+    target = f"/agents/{agent_id}"
+    query_parts: list[str] = []
+    if message:
+        query_parts.append(f"message={quote(message, safe='')}")
+    if error:
+        query_parts.append(f"error={quote(error, safe='')}")
+    if query_parts:
+        target = f"{target}?{'&'.join(query_parts)}"
+    return RedirectResponse(target, status_code=303)
 
 
 def _redirect_to_run(run_id: uuid.UUID, *, message: str | None = None, error: str | None = None) -> RedirectResponse:

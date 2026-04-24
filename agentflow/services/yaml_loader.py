@@ -68,6 +68,10 @@ def load_agent_config(path: Path) -> AgentConfig:
 
 def load_agent_document(path: Path) -> AgentDocument:
     raw_yaml = read_yaml_text(path)
+    return load_agent_document_from_text(raw_yaml)
+
+
+def load_agent_document_from_text(raw_yaml: str) -> AgentDocument:
     payload = parse_yaml_text(raw_yaml)
     config = validate_agent_payload(payload)
     return AgentDocument(raw_yaml=raw_yaml, payload=payload, config=config)
