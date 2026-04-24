@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Run</h1>
+  <p><code>{{ run.run_id }}</code></p>
+</section>
+
+<section class="panel">
+  <h2>Run Metadata</h2>
+  <dl class="meta">
+    <dt>Status</dt><dd><span class="status status-{{ run.status }}">{{ run.status }}</span></dd>
+    <dt>Agent ID</dt><dd><a href="/agents/{{ run.agent_id }}"><code>{{ run.agent_id }}</code></a></dd>
+    <dt>Version ID</dt><dd><code>{{ run.version_id }}</code></dd>
+    <dt>Source Run</dt><dd>{% if run.source_run_id %}<a href="/runs/{{ run.source_run_id }}"><code>{{ run.source_run_id }}</code></a>{% else %}-{% endif %}</dd>
+    <dt>Attempts</dt><dd>{{ run.attempt_count }}/{{ run.max_attempts }}</dd>
+    <dt>Retryable</dt><dd>{{ run.retryable }}</dd>
+    <dt>Last Error Type</dt><dd>{{ run.last_error_type or "-" }}</dd>
+    <dt>Created</dt><dd>{{ run.created_at }}</dd>
+    <dt>Started</dt><dd>{{ run.started_at }}</dd>
+    <dt>Ended</dt><dd>{{ run.ended_at }}</dd>
+    <dt>Updated</dt><dd>{{ run.updated_at }}</dd>
+    <dt>Output Summary</dt><dd>{{ run.output_summary or "-" }}</dd>
+    <dt>Error Message</dt><dd>{{ run.error_message or "-" }}</dd>
+  </dl>
+</section>
+
+<section class="grid-two">
+  <div class="panel">
+    <h2>Input JSON</h2>
+    <pre>{{ run.input_json }}</pre>
+  </div>
+  <div class="panel">
+    <h2>Output JSON</h2>
+    <pre>{{ run.output_json }}</pre>
+  </div>
+</section>
+
+<section class="panel">
+  <h2>Resolved Config Snapshot</h2>
+  <pre>{{ run.resolved_config_json }}</pre>
+</section>
+
+<section class="panel">
+  <h2>Event Timeline</h2>
+  {% if events %}
+  <ol class="timeline">
+    {% for event in events %}
+    <li>
+      <div class="event-head">
+        <strong>{{ event.event_type }}</strong>
+        <span>{{ event.created_at }}</span>
+      </div>
+      <p>{{ event.message or "-" }}</p>
+      <pre>{{ event.payload_json }}</pre>
+    </li>
+    {% endfor %}
+  </ol>
+  {% else %}
+  <p class="empty">No events found for this run.</p>
+  {% endif %}
+</section>
+{% endblock %}

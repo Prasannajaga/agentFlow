@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>{{ title }}</h1>
+  <p>{{ status_code }} · {{ message }}</p>
+</section>
+
+<section class="actions">
+  <a class="button" href="/">Back to dashboard</a>
+</section>
+{% endblock %}

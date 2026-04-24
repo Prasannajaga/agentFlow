@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>{{ agent.name }}</h1>
+  <p>{{ agent.description or "No description." }}</p>
+</section>
+
+<section class="panel">
+  <h2>Agent Metadata</h2>
+  <dl class="meta">
+    <dt>Agent ID</dt><dd><code>{{ agent.agent_id }}</code></dd>
+    <dt>Created</dt><dd>{{ agent.created_at }}</dd>
+    <dt>Updated</dt><dd>{{ agent.updated_at }}</dd>
+    <dt>Latest Version</dt>
+    <dd>
+      {% if agent.latest_version %}
+        v{{ agent.latest_version.version_number }} · <code>{{ agent.latest_version.version_id }}</code>
+      {% else %}
+        -
+      {% endif %}
+    </dd>
+  </dl>
+</section>
+
+<section class="panel">
+  <h2>Versions</h2>
+  {% if versions %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Version</th>
+          <th>Version ID</th>
+          <th>Config Hash</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for version in versions %}
+        <tr>
+          <td>v{{ version.version_number }}</td>
+          <td><code>{{ version.version_id }}</code></td>
+          <td><code>{{ version.config_hash }}</code></td>
+          <td>{{ version.created_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No versions found.</p>
+  {% endif %}
+</section>
+{% endblock %}

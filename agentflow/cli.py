@@ -122,6 +122,11 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
 
     subparsers.add_parser("worker", help="Start the background run worker.")
 
+    view_parser = subparsers.add_parser("view", help="Start the local read-only dashboard viewer.")
+    view_parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Defaults to 127.0.0.1.")
+    view_parser.add_argument("--port", type=parse_positive_int, default=8000, help="Port to bind. Defaults to 8000.")
+    view_parser.add_argument("--reload", action="store_true", help="Reload the viewer during local development.")
+
     db_parser = subparsers.add_parser("db", help="Database configuration helpers.")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
 
@@ -951,6 +956,18 @@ def run_worker() -> int:
     return 0
 
 
+def run_view(*, host: str, port: int, reload: bool) -> int:
+    try:
+        import uvicorn
+    except ImportError:
+        print("Viewer dependencies are not installed. Install with `pip install -e .`.", file=sys.stderr)
+        return 1
+
+    print(f"AgentFlow viewer running at http://{host}:{port}", flush=True)
+    uvicorn.run("agentflow.viewer.main:app", host=host, port=port, reload=reload)
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser(prog=Path(sys.argv[0]).name)
@@ -982,6 +999,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_show_run_events(args.run_id)
     if args.command == "worker":
         return run_worker()
+    if args.command == "view":
+        return run_view(host=args.host, port=args.port, reload=args.reload)
     if args.command == "db":
         if args.db_command == "show":
             return run_db_show(args.json)

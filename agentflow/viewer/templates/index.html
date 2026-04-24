@@ -1,0 +1,22 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Dashboard</h1>
+  <p>Local read-only view of registered agents and persisted runs.</p>
+</section>
+
+<section class="stats-grid" aria-label="Summary statistics">
+  <div class="stat"><span>Agents</span><strong>{{ stats.agents_total }}</strong></div>
+  <div class="stat"><span>Runs</span><strong>{{ stats.runs_total }}</strong></div>
+  <div class="stat"><span>Pending</span><strong>{{ stats.runs_pending }}</strong></div>
+  <div class="stat"><span>Running</span><strong>{{ stats.runs_running }}</strong></div>
+  <div class="stat"><span>Completed</span><strong>{{ stats.runs_completed }}</strong></div>
+  <div class="stat"><span>Failed</span><strong>{{ stats.runs_failed }}</strong></div>
+</section>
+
+<section class="actions">
+  <a class="button" href="/agents">View agents</a>
+  <a class="button" href="/runs">View runs</a>
+</section>
+{% endblock %}

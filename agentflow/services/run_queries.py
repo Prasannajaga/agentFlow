@@ -390,12 +390,14 @@ def mark_agent_run_failed(
 
 
 def list_agent_runs(
+    *,
+    limit: int | None = None,
     session_factory: sessionmaker[Session] | None = None,
 ) -> list[AgentRunSummary]:
     session_factory = session_factory or create_session_factory()
 
     with session_factory() as session:
-        rows = session.execute(
+        statement = (
             select(
                 AgentRun.id,
                 AgentRun.agent_id,
@@ -410,7 +412,11 @@ def list_agent_runs(
                 AgentRun.ended_at,
             )
             .order_by(AgentRun.created_at.desc(), AgentRun.id.desc())
-        ).all()
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+
+        rows = session.execute(statement).all()
 
     return [
         AgentRunSummary(

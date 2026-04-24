@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Runs</h1>
+  <p>Newest {{ limit }} runs.</p>
+</section>
+
+{% if runs %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Run ID</th>
+        <th>Status</th>
+        <th>Agent ID</th>
+        <th>Version ID</th>
+        <th>Source Run</th>
+        <th>Attempts</th>
+        <th>Created</th>
+        <th>Started</th>
+        <th>Ended</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for run in runs %}
+      <tr>
+        <td><a href="/runs/{{ run.run_id }}"><code>{{ run.run_id }}</code></a></td>
+        <td><span class="status status-{{ run.status }}">{{ run.status }}</span></td>
+        <td><a href="/agents/{{ run.agent_id }}"><code>{{ run.agent_id }}</code></a></td>
+        <td><code>{{ run.version_id }}</code></td>
+        <td>{% if run.source_run_id %}<a href="/runs/{{ run.source_run_id }}"><code>{{ run.source_run_id }}</code></a>{% else %}-{% endif %}</td>
+        <td>{{ run.attempt_count }}/{{ run.max_attempts }}</td>
+        <td>{{ run.created_at }}</td>
+        <td>{{ run.started_at }}</td>
+        <td>{{ run.ended_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="empty">No runs found.</p>
+{% endif %}
+{% endblock %}

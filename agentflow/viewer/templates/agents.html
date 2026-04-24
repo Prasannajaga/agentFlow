@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Agents</h1>
+  <p>{{ agents|length }} registered agent{{ "" if agents|length == 1 else "s" }}.</p>
+</section>
+
+{% if agents %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Name</th>
+        <th>Agent ID</th>
+        <th>Description</th>
+        <th>Latest Version</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for agent in agents %}
+      <tr>
+        <td><a href="/agents/{{ agent.agent_id }}">{{ agent.name }}</a></td>
+        <td><code>{{ agent.agent_id }}</code></td>
+        <td>{{ agent.description or "-" }}</td>
+        <td>
+          {% if agent.latest_version %}
+            v{{ agent.latest_version.version_number }}<br>
+            <code>{{ agent.latest_version.version_id }}</code>
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td>{{ agent.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="empty">No agents registered yet.</p>
+{% endif %}
+{% endblock %}
