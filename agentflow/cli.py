@@ -88,6 +88,12 @@ from agentflow.services.eval_service import (
     evaluate_run,
     list_run_evaluations,
 )
+from agentflow.services.import_export_service import (
+    AgentExportNotFoundError,
+    AgentPackageValidationError,
+    export_agent_package,
+    import_agent_package,
+)
 from agentflow.services.label_service import (
     LabelDuplicateError,
     LabelInvalidError,
@@ -287,6 +293,22 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     view_parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Defaults to 127.0.0.1.")
     view_parser.add_argument("--port", type=parse_positive_int, default=8000, help="Port to bind. Defaults to 8000.")
     view_parser.add_argument("--reload", action="store_true", help="Reload the viewer during local development.")
+
+    export_parser = subparsers.add_parser("export", help="Export local agent portability packages.")
+    export_subparsers = export_parser.add_subparsers(dest="export_command", required=True)
+    export_agent_parser = export_subparsers.add_parser("agent", help="Export one agent and related local metadata.")
+    export_agent_parser.add_argument("agent_id", help="UUID of the agent to export.")
+    export_agent_parser.add_argument(
+        "--output",
+        required=True,
+        type=Path,
+        help="Directory path to write the export package into.",
+    )
+
+    import_parser = subparsers.add_parser("import", help="Import local portability packages.")
+    import_subparsers = import_parser.add_subparsers(dest="import_command", required=True)
+    import_agent_parser = import_subparsers.add_parser("agent", help="Import one exported agent package.")
+    import_agent_parser.add_argument("package_path", type=Path, help="Path to the exported package directory.")
 
     db_parser = subparsers.add_parser("db", help="Database configuration helpers.")
     db_subparsers = db_parser.add_subparsers(dest="db_command", required=True)
@@ -1754,6 +1776,55 @@ def run_view(*, host: str, port: int, reload: bool) -> int:
     return 0
 
 
+def run_export_command(args: argparse.Namespace) -> int:
+    if args.export_command != "agent":
+        print("Unknown export command.", file=sys.stderr)
+        return 1
+
+    try:
+        agent_id = parse_agent_id(args.agent_id)
+        result = export_agent_package(agent_id, args.output)
+    except AgentExportNotFoundError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except AgentPackageValidationError as exc:
+        print(f"Export failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Export agent")
+
+    print("Agent export completed")
+    print_key_value("agent_id", result.source_agent_id)
+    print_key_value("versions", result.version_count)
+    print_key_value("presets", result.preset_count)
+    print_key_value("version_labels", result.version_label_count)
+    print_key_value("run_labels_included", "no")
+    print_key_value("output_path", result.output_path)
+    return 0
+
+
+def run_import_command(args: argparse.Namespace) -> int:
+    if args.import_command != "agent":
+        print("Unknown import command.", file=sys.stderr)
+        return 1
+
+    try:
+        result = import_agent_package(args.package_path)
+    except AgentPackageValidationError as exc:
+        print(f"Import failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Import agent")
+
+    print("Agent import completed")
+    print_key_value("new_agent_id", result.new_agent_id)
+    print_key_value("versions_imported", result.version_count)
+    print_key_value("presets_imported", result.preset_count)
+    print_key_value("version_labels_imported", result.version_label_count)
+    print_key_value("run_labels_imported", "no")
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args_list = list(argv) if argv is not None else sys.argv[1:]
     parser = build_parser(prog=Path(sys.argv[0]).name)
@@ -1799,6 +1870,10 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_worker_command(args)
     if args.command == "view":
         return run_view(host=args.host, port=args.port, reload=args.reload)
+    if args.command == "export":
+        return run_export_command(args)
+    if args.command == "import":
+        return run_import_command(args)
     if args.command == "db":
         if args.db_command == "show":
             return run_db_show(args.json)
