@@ -1,0 +1,24 @@
+name: text-agent-invalid-timeout
+version: 1
+description: Invalid timeout for validation checks
+
+provider:
+  type: fake
+  model: stub-model
+
+system_prompt: |
+  You are a focused research agent.
+
+runtime:
+  max_steps: 12
+  timeout_seconds: 900
+  provider_timeout_seconds: 0
+  retry:
+    max_attempts: 1
+    backoff_seconds: 0
+
+tools: []
+
+outputs:
+  save_final_text: true
+  save_artifacts: true

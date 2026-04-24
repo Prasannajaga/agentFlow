@@ -24,15 +24,20 @@ from agentflow.config import (
     DEFAULT_DATABASE_DRIVER,
     DEFAULT_DATABASE_HOST,
     DEFAULT_DATABASE_PORT,
+    DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS,
+    DEFAULT_WORKER_STALE_THRESHOLD_SECONDS,
     build_database_url,
     clear_settings_cache,
     get_settings,
+    get_worker_heartbeat_interval_seconds,
+    get_worker_stale_threshold_seconds,
     redact_database_url,
 )
 from agentflow.services.db_migrations import apply_sql_migrations
 from agentflow.services.agent_registry import AgentRegistrationAgentNotFoundError, register_agent
 from agentflow.services.agent_runner import (
     AgentNotFoundError,
+    AgentRunConfigurationError,
     AgentRunNotFoundError,
     AgentRunSnapshotMissingError,
     AgentVersionAgentMismatchError,
@@ -41,6 +46,7 @@ from agentflow.services.agent_runner import (
     create_run_for_agent,
     rerun_agent_run,
 )
+from agentflow.services.runtime_validation import RuntimeValidationError, validate_run_configuration
 from agentflow.services.agent_queries import (
     AgentDetail,
     AgentSummary,
@@ -107,11 +113,26 @@ from agentflow.services.preset_service import (
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.run_events import RunEventRecord, RunEventSummary, get_run_event_summary, list_run_events
 from agentflow.services.worker_jobs import start_worker_loop
+from agentflow.services.worker_ops import (
+    StaleRunCandidate,
+    WorkerStatusRecord,
+    find_stale_runs,
+    list_workers,
+    recover_stale_runs,
+)
 from agentflow.services.yaml_loader import AgentYamlError, load_agent_document, normalize_agent_config
 
 DEFAULT_LOCAL_DATABASE_NAME = "flow_agent"
 DEFAULT_LOCAL_DATABASE_USER = "postgres"
 DEFAULT_LOCAL_DATABASE_PASSWORD = "postgres"
+SETUP_FAILURE_CLASSIFICATIONS = frozenset(
+    {
+        "config_error",
+        "secret_error",
+        "provider_setup_error",
+        "tool_validation_error",
+    }
+)
 
 
 def parse_positive_int(value: str) -> int:
@@ -247,7 +268,20 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     artifact_cat = artifact_subparsers.add_parser("cat", help="Print a text or JSON artifact.")
     artifact_cat.add_argument("artifact_id", help="UUID of the artifact to print.")
 
-    subparsers.add_parser("worker", help="Start the background run worker.")
+    worker_parser = subparsers.add_parser("worker", help="Start the worker and inspect worker operational status.")
+    worker_subparsers = worker_parser.add_subparsers(dest="worker_command")
+    worker_subparsers.add_parser("start", help="Start the background run worker loop.")
+    worker_subparsers.add_parser("status", help="Show worker heartbeat and freshness status.")
+    worker_subparsers.add_parser("stale-runs", help="List stale running run candidates.")
+    worker_recover_parser = worker_subparsers.add_parser(
+        "recover-stale",
+        help="Recover stale running runs back to pending.",
+    )
+    worker_recover_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Print stale candidates without changing run state.",
+    )
 
     view_parser = subparsers.add_parser("view", help="Start the local read-only dashboard viewer.")
     view_parser.add_argument("--host", default="127.0.0.1", help="Host to bind. Defaults to 127.0.0.1.")
@@ -634,6 +668,8 @@ def print_run_summary(run: AgentRunDetail, *, file: IO[str] = sys.stdout) -> Non
     print_key_value("attempt_count", run.attempt_count, file=file)
     print_key_value("max_attempts", run.max_attempts, file=file)
     print_key_value("retryable", run.retryable, file=file)
+    print_key_value("claimed_by_worker", run.claimed_by_worker or "-", file=file)
+    print_key_value("claimed_at", format_optional_timestamp(run.claimed_at), file=file)
     print_key_value("labels", ", ".join(record.label for record in list_run_labels(run.run_id)) or "-", file=file)
     print_key_value("last_error_type", run.last_error_type or "-", file=file)
     print_key_value("created_at", format_timestamp(run.created_at), file=file)
@@ -652,6 +688,9 @@ def print_run_detail(
     if event_summary is not None:
         print_key_value("event_count", event_summary.event_count, file=file)
         print_key_value("latest_event_type", event_summary.latest_event_type or "-", file=file)
+
+    if run.last_error_type in SETUP_FAILURE_CLASSIFICATIONS:
+        print_key_value("failure_classification", run.last_error_type, file=file)
 
     if run.error_message:
         print_key_value("error_message", run.error_message, file=file)
@@ -720,6 +759,64 @@ def print_run_events(run_id: uuid.UUID, events: Sequence[RunEventRecord], *, fil
         )
         if event.payload_json is not None:
             print(f"  payload_json: {format_payload_json(event.payload_json)}", file=file)
+
+
+def print_worker_status_table(workers: Sequence[WorkerStatusRecord]) -> None:
+    rows = [
+        (
+            worker.worker_name,
+            worker.host or "-",
+            worker.pid or "-",
+            worker.status,
+            worker.freshness,
+            worker.heartbeat_age_seconds,
+            format_timestamp(worker.last_heartbeat_at),
+            format_timestamp(worker.started_at),
+        )
+        for worker in workers
+    ]
+    print(
+        render_table(
+            (
+                "worker_name",
+                "host",
+                "pid",
+                "status",
+                "freshness",
+                "heartbeat_age_s",
+                "last_heartbeat_at",
+                "started_at",
+            ),
+            rows,
+        )
+    )
+
+
+def print_stale_runs_table(stale_runs: Sequence[StaleRunCandidate]) -> None:
+    rows = [
+        (
+            stale_run.run_id,
+            stale_run.agent_id,
+            stale_run.claimed_by_worker or "-",
+            format_optional_timestamp(stale_run.claimed_at),
+            stale_run.stale_age_seconds,
+            stale_run.reason,
+        )
+        for stale_run in stale_runs
+    ]
+    print(
+        render_table(
+            (
+                "run_id",
+                "agent_id",
+                "claimed_worker",
+                "claimed_at",
+                "age_s",
+                "reason",
+            ),
+            rows,
+        )
+    )
 
 
 def print_presets_table(presets: Sequence[InputPresetRecord]) -> None:
@@ -1062,7 +1159,19 @@ def run_validate(path: Path) -> int:
         return 1
 
     normalized = normalize_agent_config(document.config)
+    try:
+        validated = validate_run_configuration(normalized)
+    except RuntimeValidationError as exc:
+        print(f"Validation failed for {path}", file=sys.stderr)
+        print(f"- classification: {exc.classification}", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+        return 1
+
     print(f"Validation succeeded for {path}")
+    print(f"provider_type: {validated.provider.provider_type}")
+    print(f"tools: {', '.join(validated.tools) if validated.tools else '-'}")
+    print(f"timeout_seconds: {validated.timeouts.timeout_seconds}")
+    print(f"provider_timeout_seconds: {validated.timeouts.provider_timeout_seconds}")
     print(json.dumps(normalized, indent=2))
     return 0
 
@@ -1191,6 +1300,11 @@ def run_run_agent(
         return 1
     except AgentVersionAgentMismatchError as exc:
         print(str(exc), file=sys.stderr)
+        return 1
+    except AgentRunConfigurationError as exc:
+        print("Run creation failed due to configuration validation.", file=sys.stderr)
+        print(f"- classification: {exc.classification}", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
         return 1
     except Exception as exc:
         return handle_cli_query_error(exc, action="Create run")
@@ -1353,6 +1467,11 @@ def run_preset_command(args: argparse.Namespace) -> int:
             print_run_summary(prepared_run.run)
             print_key_value("message", "Run is pending and will be picked up by a worker.")
             return 0
+    except AgentRunConfigurationError as exc:
+        print("Run creation failed due to configuration validation.", file=sys.stderr)
+        print(f"- classification: {exc.classification}", file=sys.stderr)
+        print(f"- {exc}", file=sys.stderr)
+        return 1
     except (PresetInvalidError, PresetDuplicateError, PresetAgentNotFoundError, PresetNotFoundError, ValueError) as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -1509,7 +1628,19 @@ def run_artifact_command(args: argparse.Namespace) -> int:
     return 1
 
 
-def run_worker() -> int:
+def run_worker_start() -> int:
+    try:
+        heartbeat_interval_seconds = get_worker_heartbeat_interval_seconds()
+    except ConfigurationError as exc:
+        print(f"Worker start failed: {exc}", file=sys.stderr)
+        return 1
+
+    if heartbeat_interval_seconds != DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS:
+        print(
+            f"Configured heartbeat interval: {heartbeat_interval_seconds}s "
+            f"(default {DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS}s)"
+        )
+
     try:
         start_worker_loop()
     except KeyboardInterrupt:
@@ -1519,6 +1650,96 @@ def run_worker() -> int:
         return handle_cli_query_error(exc, action="Worker start")
 
     return 0
+
+
+def run_worker_status() -> int:
+    try:
+        stale_threshold_seconds = get_worker_stale_threshold_seconds()
+        workers = list_workers(stale_threshold_seconds=stale_threshold_seconds)
+        stale_runs = find_stale_runs(stale_threshold_seconds=stale_threshold_seconds)
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Worker status")
+
+    print_key_value("stale_threshold_seconds", stale_threshold_seconds)
+    if stale_threshold_seconds != DEFAULT_WORKER_STALE_THRESHOLD_SECONDS:
+        print_key_value("default_stale_threshold_seconds", DEFAULT_WORKER_STALE_THRESHOLD_SECONDS)
+    print()
+
+    active_count = sum(1 for worker in workers if worker.freshness == "active")
+    stale_count = len(workers) - active_count
+    print_key_value("workers_total", len(workers))
+    print_key_value("workers_active", active_count)
+    print_key_value("workers_stale", stale_count)
+    print_key_value("stale_run_candidates", len(stale_runs))
+    print()
+
+    if not workers:
+        print("No worker heartbeat rows found.")
+        return 0
+
+    print_worker_status_table(workers)
+    return 0
+
+
+def run_worker_stale_runs() -> int:
+    try:
+        stale_threshold_seconds = get_worker_stale_threshold_seconds()
+        stale_runs = find_stale_runs(stale_threshold_seconds=stale_threshold_seconds)
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Worker stale-runs")
+
+    print_key_value("stale_threshold_seconds", stale_threshold_seconds)
+    if stale_threshold_seconds != DEFAULT_WORKER_STALE_THRESHOLD_SECONDS:
+        print_key_value("default_stale_threshold_seconds", DEFAULT_WORKER_STALE_THRESHOLD_SECONDS)
+    print_key_value("stale_run_candidates", len(stale_runs))
+    print()
+
+    if not stale_runs:
+        print("No stale running runs found.")
+        return 0
+
+    print_stale_runs_table(stale_runs)
+    return 0
+
+
+def run_worker_recover_stale(*, dry_run: bool) -> int:
+    try:
+        stale_threshold_seconds = get_worker_stale_threshold_seconds()
+        result = recover_stale_runs(
+            stale_threshold_seconds=stale_threshold_seconds,
+            dry_run=dry_run,
+        )
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Worker recover-stale")
+
+    print_key_value("stale_threshold_seconds", stale_threshold_seconds)
+    print_key_value("candidates", result.candidate_count)
+    if result.stale_runs:
+        print()
+        print_stale_runs_table(result.stale_runs)
+        print()
+
+    if dry_run:
+        print("Dry-run only. No run state was modified.")
+        return 0
+
+    print_key_value("recovered", result.recovered_count)
+    print_key_value("skipped", result.skipped_count)
+    return 0
+
+
+def run_worker_command(args: argparse.Namespace) -> int:
+    if args.worker_command in (None, "start"):
+        return run_worker_start()
+    if args.worker_command == "status":
+        return run_worker_status()
+    if args.worker_command == "stale-runs":
+        return run_worker_stale_runs()
+    if args.worker_command == "recover-stale":
+        return run_worker_recover_stale(dry_run=bool(args.dry_run))
+
+    print("Unknown worker command.", file=sys.stderr)
+    return 1
 
 
 def run_view(*, host: str, port: int, reload: bool) -> int:
@@ -1575,7 +1796,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "artifact":
         return run_artifact_command(args)
     if args.command == "worker":
-        return run_worker()
+        return run_worker_command(args)
     if args.command == "view":
         return run_view(host=args.host, port=args.port, reload=args.reload)
     if args.command == "db":

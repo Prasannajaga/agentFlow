@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
+
+from agentflow.services.secret_resolution import SecretResolutionError, parse_secret_ref
 
 NonEmptyString = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 PositiveInt = Annotated[int, Field(gt=0)]
@@ -20,6 +22,24 @@ class ProviderConfig(StrictModel):
     base_url: NonEmptyString | None = None
     api_key_ref: NonEmptyString | None = None
 
+    @model_validator(mode="after")
+    def validate_provider_requirements(self) -> "ProviderConfig":
+        if self.type == "fake":
+            return self
+
+        if self.type == "openai_compatible":
+            if self.base_url is None:
+                raise ValueError("provider.base_url is required for openai_compatible.")
+            if self.api_key_ref is None:
+                raise ValueError("provider.api_key_ref is required for openai_compatible.")
+            try:
+                parse_secret_ref(self.api_key_ref)
+            except SecretResolutionError as exc:
+                raise ValueError(str(exc)) from exc
+            return self
+
+        raise ValueError(f"Unsupported provider type: {self.type}")
+
 
 class RetryConfig(StrictModel):
     max_attempts: PositiveInt = 1
@@ -29,6 +49,7 @@ class RetryConfig(StrictModel):
 class RuntimeConfig(StrictModel):
     max_steps: PositiveInt = 10
     timeout_seconds: PositiveInt = 600
+    provider_timeout_seconds: PositiveInt | None = None
     retry: RetryConfig = Field(default_factory=RetryConfig)
 
 

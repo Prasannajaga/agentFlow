@@ -23,12 +23,14 @@ from agentflow.services.run_events import (
     RUN_EVENT_RUN_RETRY_LIMIT_REACHED,
     RUN_EVENT_RUN_RETRY_SCHEDULED,
     RUN_EVENT_RUN_STARTED,
+    RUN_EVENT_RUN_CLAIMED_BY_WORKER,
     RUN_EVENT_WORKER_PICKED_UP_RUN,
     RunEventCreate,
     record_run_events,
 )
 from agentflow.services.retry_policy import extract_max_attempts, should_retry_failed_attempt
 from agentflow.services.artifact_service import save_run_json_artifact
+from agentflow.services.worker_ops import clear_run_claim, mark_run_claimed
 
 RunStatus = Literal["pending", "running", "completed", "failed"]
 
@@ -61,6 +63,8 @@ class AgentRunSummary:
     created_at: datetime
     started_at: datetime | None
     ended_at: datetime | None
+    claimed_by_worker: str | None = None
+    claimed_at: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +86,8 @@ class AgentRunDetail:
     started_at: datetime | None
     ended_at: datetime | None
     updated_at: datetime
+    claimed_by_worker: str | None = None
+    claimed_at: datetime | None = None
 
 
 def get_agent_execution_target(
@@ -236,6 +242,7 @@ def claim_next_pending_run(
                 return None
 
             _start_run_attempt(run, started_at=now)
+            mark_run_claimed(run, worker_name=worker_id, claimed_at=now)
             record_run_events(
                 run.id,
                 events=(
@@ -243,6 +250,14 @@ def claim_next_pending_run(
                         event_type=RUN_EVENT_WORKER_PICKED_UP_RUN,
                         message="Worker claimed the pending run.",
                         payload_json={"worker_id": worker_id} if worker_id is not None else None,
+                    ),
+                    RunEventCreate(
+                        event_type=RUN_EVENT_RUN_CLAIMED_BY_WORKER,
+                        message="Run claim metadata recorded for stale-run recovery.",
+                        payload_json={
+                            "worker_name": worker_id,
+                            "claimed_at": now.isoformat(),
+                        },
                     ),
                     RunEventCreate(
                         event_type=RUN_EVENT_RUN_ATTEMPT_STARTED,
@@ -355,7 +370,9 @@ def mark_agent_run_failed(
                 retryable=run.retryable,
             ):
                 run.status = RUN_STATUS_PENDING
+                run.started_at = None
                 run.ended_at = None
+                clear_run_claim(run)
                 retry_events.append(
                     RunEventCreate(
                         event_type=RUN_EVENT_RUN_RETRY_SCHEDULED,
@@ -417,6 +434,8 @@ def list_agent_runs(
                 AgentRun.attempt_count,
                 AgentRun.max_attempts,
                 AgentRun.retryable,
+                AgentRun.claimed_by_worker,
+                AgentRun.claimed_at,
                 AgentRun.created_at,
                 AgentRun.started_at,
                 AgentRun.ended_at,
@@ -438,6 +457,8 @@ def list_agent_runs(
             attempt_count=row.attempt_count,
             max_attempts=row.max_attempts,
             retryable=row.retryable,
+            claimed_by_worker=row.claimed_by_worker,
+            claimed_at=row.claimed_at,
             created_at=row.created_at,
             started_at=row.started_at,
             ended_at=row.ended_at,
@@ -486,6 +507,8 @@ def _update_agent_run(
                 _start_run_attempt(run, started_at=started_at if isinstance(started_at, datetime) else utc_now())
             else:
                 run.status = status
+                if status == RUN_STATUS_PENDING:
+                    clear_run_claim(run)
             run.updated_at = utc_now()
 
             if started_at is not _UNSET and not increment_attempt:
@@ -532,6 +555,8 @@ def _build_run_detail(run: AgentRun) -> AgentRunDetail:
         attempt_count=run.attempt_count,
         max_attempts=run.max_attempts,
         retryable=run.retryable,
+        claimed_by_worker=run.claimed_by_worker,
+        claimed_at=run.claimed_at,
         created_at=run.created_at,
         started_at=run.started_at,
         ended_at=run.ended_at,

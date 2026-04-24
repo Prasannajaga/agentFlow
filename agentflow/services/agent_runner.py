@@ -15,7 +15,6 @@ from agentflow.providers.base import (
     preview_text,
 )
 from agentflow.providers.registry import get_provider_adapter
-from agentflow.services.fake_provider import execute_fake_agent
 from agentflow.services.agent_queries import get_registered_agent
 from agentflow.services.run_queries import (
     RUN_STATUS_PENDING,
@@ -32,10 +31,15 @@ from agentflow.services.run_queries import (
     mark_agent_run_running,
 )
 from agentflow.services.run_events import (
+    RUN_EVENT_PROVIDER_CONFIGURATION_VALIDATED,
+    RUN_EVENT_PROVIDER_SETUP_FAILED,
     RUN_EVENT_TOOL_EXECUTION_COMPLETED,
     RUN_EVENT_TOOL_EXECUTION_FAILED,
     RUN_EVENT_TOOL_EXECUTION_STARTED,
-    RUN_EVENT_TOOLS_VALIDATED,
+    RUN_EVENT_TOOLS_CONFIGURATION_VALIDATED,
+    RUN_EVENT_RUN_CONFIGURATION_VALIDATION_FAILED,
+    RUN_EVENT_RUN_CONFIGURATION_VALIDATION_STARTED,
+    RUN_EVENT_SECRET_RESOLUTION_FAILED,
     RUN_EVENT_PROVIDER_EXECUTION_FAILED,
     RUN_EVENT_PROVIDER_EXECUTION_COMPLETED,
     RUN_EVENT_PROVIDER_REQUEST_PREPARED,
@@ -47,7 +51,16 @@ from agentflow.services.run_events import (
 )
 from agentflow.tools.base import ToolError, ToolExecutionError, ToolInvocationRequest, ToolResult
 from agentflow.tools.echo import ECHO_TOOL_NAME, build_echo_input, preview_echo_result
-from agentflow.tools.registry import get_tool_adapter, validate_tool_names
+from agentflow.tools.registry import get_tool_adapter
+from agentflow.services.runtime_validation import (
+    RUNTIME_ERROR_PROVIDER_SETUP,
+    RUNTIME_ERROR_SECRET,
+    RuntimeValidationError,
+    build_provider_request,
+    classify_runtime_error,
+    validate_provider_setup,
+    validate_run_configuration,
+)
 
 RunExecutor = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -96,6 +109,12 @@ class AgentRunSnapshotMissingError(AgentRunError):
         self.run_id = run_id
 
 
+class AgentRunConfigurationError(AgentRunError):
+    def __init__(self, *, classification: str, message: str):
+        super().__init__(message)
+        self.classification = classification
+
+
 class AgentRunExecutionFailedError(AgentRunError):
     def __init__(self, run: AgentRunDetail):
         message = run.error_message or "Agent execution failed."
@@ -136,6 +155,14 @@ def create_run_for_agent(
                 version_id=version_id,
                 actual_agent_id=execution_target.agent_id,
             )
+
+    try:
+        validate_run_configuration(execution_target.normalized_config_json)
+    except RuntimeValidationError as exc:
+        raise AgentRunConfigurationError(
+            classification=exc.classification,
+            message=f"Run configuration validation failed: {exc}",
+        ) from exc
 
     run = create_agent_run(
         agent_id=execution_target.agent_id,
@@ -211,17 +238,55 @@ def execute_claimed_run(
     if run.status != RUN_STATUS_RUNNING:
         raise AgentRunError(f"Run {run.run_id} must be running before execution.")
 
-    request: ProviderInvocationRequest | None = None
+    request = None
     provider_type = _peek_provider_type(run.resolved_config_json)
+    validated_tools: tuple[str, ...] = ()
     tool_results: list[ToolResult] = []
 
     try:
-        tool_results = _execute_tools_for_run(run, session_factory=session_factory)
-        request = ProviderInvocationRequest.from_resolved_config(
+        record_run_event(
+            run.run_id,
+            event_type=RUN_EVENT_RUN_CONFIGURATION_VALIDATION_STARTED,
+            message="Run configuration validation started.",
+            payload_json={"provider_type": provider_type},
+            session_factory=session_factory,
+        )
+
+        validated_configuration = validate_run_configuration(run.resolved_config_json)
+        validated_tools = validated_configuration.tools
+        request = build_provider_request(
             run.resolved_config_json,
             input_json=run.input_json,
         )
         provider_type = request.provider_type
+        validate_provider_setup(request)
+
+        record_run_event(
+            run.run_id,
+            event_type=RUN_EVENT_PROVIDER_CONFIGURATION_VALIDATED,
+            message="Provider configuration validated.",
+            payload_json={
+                "provider_type": request.provider_type,
+                "model": request.model,
+                "base_url": request.base_url,
+                "provider_timeout_seconds": validated_configuration.timeouts.provider_timeout_seconds,
+                "timeout_seconds": validated_configuration.timeouts.timeout_seconds,
+            },
+            session_factory=session_factory,
+        )
+        record_run_event(
+            run.run_id,
+            event_type=RUN_EVENT_TOOLS_CONFIGURATION_VALIDATED,
+            message="Tools configuration validated.",
+            payload_json={"tools": list(validated_tools)},
+            session_factory=session_factory,
+        )
+
+        tool_results = _execute_tools_for_run(
+            run,
+            validated_tools=validated_tools,
+            session_factory=session_factory,
+        )
         record_run_event(
             run.run_id,
             event_type=RUN_EVENT_PROVIDER_EXECUTION_STARTED,
@@ -274,18 +339,68 @@ def execute_claimed_run(
             raise AgentRunNotFoundError(run.run_id)
 
         return completed_run
-    except ToolError as exc:
+    except RuntimeValidationError as exc:
+        validation_events: list[RunEventCreate] = [
+            RunEventCreate(
+                event_type=RUN_EVENT_RUN_CONFIGURATION_VALIDATION_FAILED,
+                message="Run configuration validation failed.",
+                payload_json={
+                    "error_type": exc.classification,
+                    "detail_error_type": exc.error_type,
+                    "message": str(exc),
+                },
+            )
+        ]
+        if exc.classification == RUNTIME_ERROR_SECRET:
+            validation_events.append(
+                RunEventCreate(
+                    event_type=RUN_EVENT_SECRET_RESOLUTION_FAILED,
+                    message="Secret resolution failed.",
+                    payload_json={
+                        "error_type": exc.classification,
+                        "detail_error_type": exc.error_type,
+                        "message": str(exc),
+                    },
+                )
+            )
+        if exc.classification == RUNTIME_ERROR_PROVIDER_SETUP:
+            validation_events.append(
+                RunEventCreate(
+                    event_type=RUN_EVENT_PROVIDER_SETUP_FAILED,
+                    message="Provider setup failed.",
+                    payload_json={
+                        "error_type": exc.classification,
+                        "detail_error_type": exc.error_type,
+                        "message": str(exc),
+                    },
+                )
+            )
+
         failed_run = mark_agent_run_failed(
             run.run_id,
             error_message=str(exc),
-            last_error_type=exc.error_type,
+            last_error_type=exc.classification,
+            events=tuple(validation_events),
+            session_factory=session_factory,
+        )
+        if failed_run is None:
+            raise
+
+        raise AgentRunExecutionFailedError(failed_run) from exc
+    except ToolError as exc:
+        classified_error_type = classify_runtime_error(exc)
+        failed_run = mark_agent_run_failed(
+            run.run_id,
+            error_message=str(exc),
+            last_error_type=classified_error_type,
             events=(
                 RunEventCreate(
                     event_type=RUN_EVENT_TOOL_EXECUTION_FAILED,
                     message="Tool execution failed.",
                     payload_json={
                         "tool_name": exc.tool_name,
-                        "error_type": exc.error_type,
+                        "error_type": classified_error_type,
+                        "tool_error_type": exc.error_type,
                         "message": str(exc),
                     },
                 ),
@@ -297,21 +412,49 @@ def execute_claimed_run(
 
         raise AgentRunExecutionFailedError(failed_run) from exc
     except ProviderError as exc:
+        classified_error_type = classify_runtime_error(exc)
+        provider_events: list[RunEventCreate] = [
+            RunEventCreate(
+                event_type=RUN_EVENT_PROVIDER_EXECUTION_FAILED,
+                message="Provider execution failed.",
+                payload_json={
+                    "provider_type": exc.provider_type,
+                    "error_type": classified_error_type,
+                    "provider_error_type": exc.error_type,
+                    "message": str(exc),
+                },
+            )
+        ]
+        if classified_error_type == RUNTIME_ERROR_SECRET:
+            provider_events.append(
+                RunEventCreate(
+                    event_type=RUN_EVENT_SECRET_RESOLUTION_FAILED,
+                    message="Secret resolution failed.",
+                    payload_json={
+                        "error_type": classified_error_type,
+                        "provider_error_type": exc.error_type,
+                        "message": str(exc),
+                    },
+                )
+            )
+        if classified_error_type == RUNTIME_ERROR_PROVIDER_SETUP:
+            provider_events.append(
+                RunEventCreate(
+                    event_type=RUN_EVENT_PROVIDER_SETUP_FAILED,
+                    message="Provider setup failed.",
+                    payload_json={
+                        "error_type": classified_error_type,
+                        "provider_error_type": exc.error_type,
+                        "message": str(exc),
+                    },
+                )
+            )
+
         failed_run = mark_agent_run_failed(
             run.run_id,
             error_message=str(exc),
-            last_error_type=exc.error_type,
-            events=(
-                RunEventCreate(
-                    event_type=RUN_EVENT_PROVIDER_EXECUTION_FAILED,
-                    message="Provider execution failed.",
-                    payload_json={
-                        "provider_type": exc.provider_type,
-                        "error_type": exc.error_type,
-                        "message": str(exc),
-                    },
-                ),
-            ),
+            last_error_type=classified_error_type,
+            events=tuple(provider_events),
             session_factory=session_factory,
         )
         if failed_run is None:
@@ -324,17 +467,19 @@ def execute_claimed_run(
             f"Unexpected provider execution error: {exc}",
             error_type="unexpected_error",
         )
+        classified_error_type = classify_runtime_error(provider_error)
         failed_run = mark_agent_run_failed(
             run.run_id,
             error_message=str(provider_error),
-            last_error_type=provider_error.error_type,
+            last_error_type=classified_error_type,
             events=(
                 RunEventCreate(
                     event_type=RUN_EVENT_PROVIDER_EXECUTION_FAILED,
                     message="Provider execution failed.",
                     payload_json={
                         "provider_type": provider_error.provider_type,
-                        "error_type": provider_error.error_type,
+                        "error_type": classified_error_type,
+                        "provider_error_type": provider_error.error_type,
                         "message": str(provider_error),
                     },
                 ),
@@ -422,20 +567,11 @@ def _peek_provider_type(resolved_config_json: dict[str, Any]) -> str:
 def _execute_tools_for_run(
     run: AgentRunDetail,
     *,
+    validated_tools: tuple[str, ...],
     session_factory: sessionmaker[Session] | None = None,
 ) -> list[ToolResult]:
-    configured_tools = _extract_configured_tools(run.resolved_config_json)
-    if not configured_tools:
+    if not validated_tools:
         return []
-
-    validated_tools = validate_tool_names(configured_tools)
-    record_run_event(
-        run.run_id,
-        event_type=RUN_EVENT_TOOLS_VALIDATED,
-        message="Configured tools validated.",
-        payload_json={"tools": list(validated_tools)},
-        session_factory=session_factory,
-    )
 
     tool_results: list[ToolResult] = []
     if ECHO_TOOL_NAME in validated_tools:
@@ -486,10 +622,3 @@ def _execute_echo_tool(
         session_factory=session_factory,
     )
     return tool_result
-
-
-def _extract_configured_tools(resolved_config_json: dict[str, Any]) -> list[str]:
-    tools = resolved_config_json.get("tools")
-    if not isinstance(tools, list):
-        return []
-    return [tool_name for tool_name in tools if isinstance(tool_name, str)]

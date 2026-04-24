@@ -3,17 +3,18 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from agentflow.providers.base import ProviderInvocationRequest, preview_text
+from agentflow.providers.base import preview_text
 from agentflow.providers.fake import (
     FAKE_FAILURE_ENV,
     FAKE_MODEL_NAME,
     FAKE_PROVIDER_NAME,
     FakeProviderAdapter,
 )
+from agentflow.services.runtime_validation import build_provider_request
 
 
 def execute_fake_agent(config: dict[str, Any]) -> dict[str, Any]:
-    request = ProviderInvocationRequest.from_resolved_config(config)
+    request = build_provider_request(config)
     return FakeProviderAdapter().invoke(request).to_output_json()
 
 

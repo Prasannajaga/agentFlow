@@ -20,6 +20,7 @@ from agentflow.services.run_queries import (
     AgentRunDetail,
     get_agent_run,
 )
+from agentflow.services.worker_ops import clear_run_claim
 
 
 @dataclass(frozen=True)
@@ -81,7 +82,9 @@ def manual_retry_run(
 
             now = utc_now()
             run.status = RUN_STATUS_PENDING
+            run.started_at = None
             run.ended_at = None
+            clear_run_claim(run)
             run.updated_at = now
             record_run_events(
                 run.id,
@@ -133,4 +136,6 @@ def _build_action_run_detail(run: AgentRun) -> AgentRunDetail:
         started_at=run.started_at,
         ended_at=run.ended_at,
         updated_at=run.updated_at,
+        claimed_by_worker=run.claimed_by_worker,
+        claimed_at=run.claimed_at,
     )

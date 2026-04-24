@@ -14,7 +14,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 
-from agentflow.config import ConfigurationError
+from agentflow.config import ConfigurationError, get_worker_stale_threshold_seconds
 from agentflow.services.agent_registry import (
     AgentRegistrationAgentNotFoundError,
     register_agent_from_yaml_text,
@@ -76,11 +76,20 @@ from agentflow.services.run_compare import (
 from agentflow.services.run_events import RunEventRecord, list_run_events
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.stats_queries import DashboardStats, get_dashboard_stats
+from agentflow.services.worker_ops import find_stale_runs, list_workers
 from agentflow.services.yaml_loader import AgentYamlError
 
 VIEWER_DIR = Path(__file__).resolve().parent
 DEFAULT_RUN_LIMIT = 50
 MAX_RUN_LIMIT = 200
+SETUP_FAILURE_CLASSIFICATIONS = frozenset(
+    {
+        "config_error",
+        "secret_error",
+        "provider_setup_error",
+        "tool_validation_error",
+    }
+)
 
 app = FastAPI(title="AgentFlow Local Viewer", version="0.1.0")
 app.mount("/static", StaticFiles(directory=VIEWER_DIR / "static"), name="static")
@@ -324,6 +333,42 @@ def batches_index(request: Request) -> HTMLResponse:
     )
 
 
+@app.get("/ops/workers", response_class=HTMLResponse)
+def workers_ops_page(request: Request) -> HTMLResponse:
+    stale_threshold_seconds = get_worker_stale_threshold_seconds()
+    workers = list_workers(stale_threshold_seconds=stale_threshold_seconds)
+    stale_runs = find_stale_runs(stale_threshold_seconds=stale_threshold_seconds)
+    active_count = sum(1 for worker in workers if worker.freshness == "active")
+    return templates.TemplateResponse(
+        request,
+        "workers.html",
+        {
+            "page_title": "Worker Ops",
+            "stale_threshold_seconds": stale_threshold_seconds,
+            "workers": [_worker_status_to_view(worker) for worker in workers],
+            "workers_total": len(workers),
+            "workers_active": active_count,
+            "workers_stale": len(workers) - active_count,
+            "stale_run_candidates": len(stale_runs),
+        },
+    )
+
+
+@app.get("/ops/stale-runs", response_class=HTMLResponse)
+def stale_runs_ops_page(request: Request) -> HTMLResponse:
+    stale_threshold_seconds = get_worker_stale_threshold_seconds()
+    stale_runs = find_stale_runs(stale_threshold_seconds=stale_threshold_seconds)
+    return templates.TemplateResponse(
+        request,
+        "stale_runs.html",
+        {
+            "page_title": "Stale Runs",
+            "stale_threshold_seconds": stale_threshold_seconds,
+            "stale_runs": [_stale_run_to_view(item) for item in stale_runs],
+        },
+    )
+
+
 @app.get("/batches/{batch_id}", response_class=HTMLResponse)
 def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
     parsed_batch_id = _parse_uuid(batch_id)
@@ -395,6 +440,7 @@ def run_detail(request: Request, run_id: str) -> HTMLResponse:
             "can_rerun": bool(run.resolved_config_json),
             "retry_eligible": retry_eligibility.eligible,
             "retry_ineligible_reason": retry_eligibility.reason,
+            "is_setup_failure": run.last_error_type in SETUP_FAILURE_CLASSIFICATIONS,
         },
     )
 
@@ -555,6 +601,8 @@ def _run_summary_to_view(run: AgentRunSummary) -> dict[str, Any]:
         "attempt_count": run.attempt_count,
         "max_attempts": run.max_attempts,
         "retryable": run.retryable,
+        "claimed_by_worker": run.claimed_by_worker,
+        "claimed_at": _format_datetime(run.claimed_at),
         "created_at": _format_datetime(run.created_at),
         "started_at": _format_datetime(run.started_at),
         "ended_at": _format_datetime(run.ended_at),
@@ -576,6 +624,8 @@ def _run_detail_to_view(run: AgentRunDetail) -> dict[str, Any]:
                 created_at=run.created_at,
                 started_at=run.started_at,
                 ended_at=run.ended_at,
+                claimed_by_worker=run.claimed_by_worker,
+                claimed_at=run.claimed_at,
             )
         ),
         "input_json": _format_json(run.input_json),
@@ -585,6 +635,36 @@ def _run_detail_to_view(run: AgentRunDetail) -> dict[str, Any]:
         "error_message": run.error_message,
         "last_error_type": run.last_error_type,
         "updated_at": _format_datetime(run.updated_at),
+    }
+
+
+def _worker_status_to_view(worker: Any) -> dict[str, Any]:
+    return {
+        "worker_id": str(worker.worker_id),
+        "worker_name": worker.worker_name,
+        "host": worker.host or "-",
+        "pid": worker.pid if worker.pid is not None else "-",
+        "status": worker.status,
+        "freshness": worker.freshness,
+        "heartbeat_age_seconds": worker.heartbeat_age_seconds,
+        "last_heartbeat_at": _format_datetime(worker.last_heartbeat_at),
+        "started_at": _format_datetime(worker.started_at),
+        "updated_at": _format_datetime(worker.updated_at),
+    }
+
+
+def _stale_run_to_view(stale_run: Any) -> dict[str, Any]:
+    return {
+        "run_id": str(stale_run.run_id),
+        "agent_id": str(stale_run.agent_id),
+        "claimed_by_worker": stale_run.claimed_by_worker or "-",
+        "claimed_at": _format_datetime(stale_run.claimed_at),
+        "started_at": _format_datetime(stale_run.started_at),
+        "updated_at": _format_datetime(stale_run.updated_at),
+        "worker_last_heartbeat_at": _format_datetime(stale_run.worker_last_heartbeat_at),
+        "worker_status": stale_run.worker_status or "-",
+        "stale_age_seconds": stale_run.stale_age_seconds,
+        "reason": stale_run.reason,
     }
 
 

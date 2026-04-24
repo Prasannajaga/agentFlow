@@ -25,7 +25,11 @@ def validate_tool_names(tool_names: Sequence[str]) -> tuple[str, ...]:
                 error_type="unsupported_tool",
             )
         if normalized_name in seen:
-            continue
+            raise ToolConfigurationError(
+                normalized_name,
+                f"Duplicate tool entry is not allowed: {normalized_name}",
+                error_type="duplicate_tool",
+            )
         seen.add(normalized_name)
         normalized_tools.append(normalized_name)
 

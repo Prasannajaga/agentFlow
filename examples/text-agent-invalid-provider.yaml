@@ -1,0 +1,23 @@
+name: text-agent-invalid-provider
+version: 1
+description: Invalid provider type for validation checks
+
+provider:
+  type: unsupported_provider
+  model: any-model
+
+system_prompt: |
+  You are a focused research agent.
+
+runtime:
+  max_steps: 12
+  timeout_seconds: 900
+  retry:
+    max_attempts: 1
+    backoff_seconds: 0
+
+tools: []
+
+outputs:
+  save_final_text: true
+  save_artifacts: true

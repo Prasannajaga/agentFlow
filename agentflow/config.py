@@ -16,11 +16,15 @@ DATABASE_NAME_ENV = "DATABASE_NAME"
 DATABASE_USER_ENV = "DATABASE_USER"
 DATABASE_PASSWORD_ENV = "DATABASE_PASSWORD"
 ARTIFACT_STORAGE_DIR_ENV = "AGENTFLOW_ARTIFACT_STORAGE_DIR"
+WORKER_HEARTBEAT_INTERVAL_SECONDS_ENV = "WORKER_HEARTBEAT_INTERVAL_SECONDS"
+WORKER_STALE_THRESHOLD_SECONDS_ENV = "WORKER_STALE_THRESHOLD_SECONDS"
 
 DEFAULT_ENV_FILE = Path(".env")
 DEFAULT_DATABASE_DRIVER = "postgresql+psycopg"
 DEFAULT_DATABASE_HOST = "localhost"
 DEFAULT_DATABASE_PORT = 5432
+DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS = 5
+DEFAULT_WORKER_STALE_THRESHOLD_SECONDS = 600
 
 LOCAL_DATABASE_ENV_VARS = (
     DATABASE_DRIVER_ENV,
@@ -212,3 +216,34 @@ def get_artifact_storage_dir() -> Path:
     load_env_file()
     configured = os.environ.get(ARTIFACT_STORAGE_DIR_ENV, "").strip()
     return Path(configured) if configured else Path("data") / "artifacts"
+
+
+def get_worker_heartbeat_interval_seconds() -> int:
+    return _resolve_positive_int_env(
+        WORKER_HEARTBEAT_INTERVAL_SECONDS_ENV,
+        default=DEFAULT_WORKER_HEARTBEAT_INTERVAL_SECONDS,
+    )
+
+
+def get_worker_stale_threshold_seconds() -> int:
+    return _resolve_positive_int_env(
+        WORKER_STALE_THRESHOLD_SECONDS_ENV,
+        default=DEFAULT_WORKER_STALE_THRESHOLD_SECONDS,
+    )
+
+
+def _resolve_positive_int_env(name: str, *, default: int) -> int:
+    load_env_file()
+    raw_value = os.environ.get(name, "").strip()
+    if not raw_value:
+        return default
+
+    try:
+        parsed = int(raw_value)
+    except ValueError as exc:
+        raise ConfigurationError(f"{name} must be a positive integer.") from exc
+
+    if parsed <= 0:
+        raise ConfigurationError(f"{name} must be a positive integer.")
+
+    return parsed

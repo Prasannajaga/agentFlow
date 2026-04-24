@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Any
 
 import httpx
@@ -12,6 +11,7 @@ from agentflow.providers.base import (
     ProviderInvocationRequest,
     ProviderResult,
 )
+from agentflow.services.secret_resolution import SecretResolutionError, resolve_secret_ref
 
 OPENAI_COMPATIBLE_PROVIDER_TYPE = "openai_compatible"
 
@@ -126,30 +126,14 @@ def _normalize_base_url(base_url: str) -> str:
 
 
 def _resolve_api_key(api_key_ref: str) -> str:
-    if not api_key_ref.startswith("env:"):
+    try:
+        return resolve_secret_ref(api_key_ref)
+    except SecretResolutionError as exc:
         raise ProviderConfigurationError(
             OPENAI_COMPATIBLE_PROVIDER_TYPE,
-            "Unsupported api_key_ref format. Expected 'env:VARNAME'.",
-            error_type="invalid_secret_ref",
-        )
-
-    env_var_name = api_key_ref[len("env:") :].strip()
-    if not env_var_name:
-        raise ProviderConfigurationError(
-            OPENAI_COMPATIBLE_PROVIDER_TYPE,
-            "api_key_ref must include an environment variable name after 'env:'.",
-            error_type="invalid_secret_ref",
-        )
-
-    api_key = os.environ.get(env_var_name)
-    if api_key:
-        return api_key
-
-    raise ProviderConfigurationError(
-        OPENAI_COMPATIBLE_PROVIDER_TYPE,
-        f"Environment variable '{env_var_name}' is not set.",
-        error_type="missing_secret",
-    )
+            str(exc),
+            error_type=exc.error_type,
+        ) from exc
 
 
 def _extract_error_message(response: httpx.Response, *, width: int = 240) -> str:

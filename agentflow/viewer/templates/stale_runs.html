@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Stale Runs</h1>
+  <p>Running runs that appear stale based on worker heartbeat freshness and age thresholds.</p>
+</section>
+
+<section class="stats-grid" aria-label="Stale run statistics">
+  <div class="stat"><span>Stale Candidates</span><strong>{{ stale_runs|length }}</strong></div>
+  <div class="stat"><span>Stale Threshold (s)</span><strong>{{ stale_threshold_seconds }}</strong></div>
+</section>
+
+<section class="panel">
+  <h2>Candidate Runs</h2>
+  <p class="hint">Recovery is CLI-first for safety: <code>agentflow worker recover-stale --dry-run</code> then <code>agentflow worker recover-stale</code>.</p>
+  {% if stale_runs %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>Agent ID</th>
+          <th>Claimed Worker</th>
+          <th>Claimed At</th>
+          <th>Worker Heartbeat</th>
+          <th>Age (s)</th>
+          <th>Reason</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in stale_runs %}
+        <tr>
+          <td><a href="/runs/{{ item.run_id }}"><code>{{ item.run_id }}</code></a></td>
+          <td><a href="/agents/{{ item.agent_id }}"><code>{{ item.agent_id }}</code></a></td>
+          <td>{{ item.claimed_by_worker }}</td>
+          <td>{{ item.claimed_at }}</td>
+          <td>{{ item.worker_last_heartbeat_at }}</td>
+          <td>{{ item.stale_age_seconds }}</td>
+          <td>{{ item.reason }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No stale running runs found.</p>
+  {% endif %}
+</section>
+{% endblock %}

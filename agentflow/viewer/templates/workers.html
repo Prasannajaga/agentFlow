@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Workers</h1>
+  <p>Polling worker heartbeat status and freshness.</p>
+</section>
+
+<section class="stats-grid" aria-label="Worker statistics">
+  <div class="stat"><span>Total Workers</span><strong>{{ workers_total }}</strong></div>
+  <div class="stat"><span>Active</span><strong>{{ workers_active }}</strong></div>
+  <div class="stat"><span>Stale</span><strong>{{ workers_stale }}</strong></div>
+  <div class="stat"><span>Stale Run Candidates</span><strong>{{ stale_run_candidates }}</strong></div>
+  <div class="stat"><span>Stale Threshold (s)</span><strong>{{ stale_threshold_seconds }}</strong></div>
+</section>
+
+<section class="actions">
+  <a class="button" href="/ops/stale-runs">View stale runs</a>
+</section>
+
+<section class="panel">
+  <h2>Heartbeat Table</h2>
+  {% if workers %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Worker Name</th>
+          <th>Host</th>
+          <th>PID</th>
+          <th>Status</th>
+          <th>Freshness</th>
+          <th>Heartbeat Age (s)</th>
+          <th>Last Heartbeat</th>
+          <th>Started</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for worker in workers %}
+        <tr>
+          <td><code>{{ worker.worker_name }}</code></td>
+          <td>{{ worker.host }}</td>
+          <td>{{ worker.pid }}</td>
+          <td>{{ worker.status }}</td>
+          <td>{{ worker.freshness }}</td>
+          <td>{{ worker.heartbeat_age_seconds }}</td>
+          <td>{{ worker.last_heartbeat_at }}</td>
+          <td>{{ worker.started_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No workers have heartbeated yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

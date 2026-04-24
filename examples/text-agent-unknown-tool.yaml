@@ -1,0 +1,25 @@
+name: text-agent-unknown-tool
+version: 1
+description: Unknown tool for validation checks
+
+provider:
+  type: fake
+  model: stub-model
+
+system_prompt: |
+  You are a focused research agent.
+
+runtime:
+  max_steps: 12
+  timeout_seconds: 900
+  retry:
+    max_attempts: 1
+    backoff_seconds: 0
+
+tools:
+  - echo
+  - not_registered_tool
+
+outputs:
+  save_final_text: true
+  save_artifacts: true

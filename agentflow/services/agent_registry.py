@@ -16,6 +16,7 @@ from agentflow.services.yaml_loader import (
     load_agent_document_from_text,
     normalize_agent_config,
 )
+from agentflow.services.runtime_validation import RuntimeValidationError, validate_run_configuration
 from agentflow.utils.hashing import compute_config_hash
 
 
@@ -72,6 +73,10 @@ def register_agent_document(
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRegistrationResult:
     normalized_config = normalize_agent_config(document.config)
+    try:
+        validate_run_configuration(normalized_config)
+    except RuntimeValidationError as exc:
+        raise ValueError(str(exc)) from exc
     config_hash = compute_config_hash(normalized_config)
 
     now = datetime.now(timezone.utc)

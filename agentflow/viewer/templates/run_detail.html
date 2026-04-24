@@ -12,6 +12,11 @@
 {% if feedback.error %}
 <div class="notice notice-error">{{ feedback.error }}</div>
 {% endif %}
+{% if is_setup_failure and run.error_message %}
+<div class="notice notice-error">
+  Configuration/Setup Failure ({{ run.last_error_type }}): {{ run.error_message }}
+</div>
+{% endif %}
 
 <section class="panel">
   <h2>Actions</h2>
@@ -44,6 +49,8 @@
     <dt>Source Run</dt><dd>{% if run.source_run_id %}<a href="/runs/{{ run.source_run_id }}"><code>{{ run.source_run_id }}</code></a>{% else %}-{% endif %}</dd>
     <dt>Attempts</dt><dd>{{ run.attempt_count }}/{{ run.max_attempts }}</dd>
     <dt>Retryable</dt><dd>{{ run.retryable }}</dd>
+    <dt>Claimed Worker</dt><dd>{{ run.claimed_by_worker or "-" }}</dd>
+    <dt>Claimed At</dt><dd>{{ run.claimed_at }}</dd>
     <dt>Last Error Type</dt><dd>{{ run.last_error_type or "-" }}</dd>
     <dt>Created</dt><dd>{{ run.created_at }}</dd>
     <dt>Started</dt><dd>{{ run.started_at }}</dd>
