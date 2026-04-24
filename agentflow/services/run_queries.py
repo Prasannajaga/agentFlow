@@ -28,6 +28,7 @@ from agentflow.services.run_events import (
     record_run_events,
 )
 from agentflow.services.retry_policy import extract_max_attempts, should_retry_failed_attempt
+from agentflow.services.artifact_service import save_run_json_artifact
 
 RunStatus = Literal["pending", "running", "completed", "failed"]
 
@@ -290,7 +291,7 @@ def mark_agent_run_completed(
     events: Sequence[RunEventCreate] = (),
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRunDetail | None:
-    return _update_agent_run(
+    completed_run = _update_agent_run(
         run_id,
         status=RUN_STATUS_COMPLETED,
         output_json=output_json,
@@ -300,6 +301,15 @@ def mark_agent_run_completed(
         events=events,
         session_factory=session_factory,
     )
+    if completed_run is not None:
+        save_run_json_artifact(
+            completed_run.run_id,
+            name="output.json",
+            payload=output_json,
+            description="Full run output JSON.",
+            session_factory=session_factory,
+        )
+    return completed_run
 
 
 def mark_agent_run_failed(

@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, Uuid
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -38,6 +38,7 @@ class AgentDefinition(Base):
         back_populates="agent",
         cascade="all, delete-orphan",
     )
+    run_batches: Mapped[list["RunBatch"]] = relationship(back_populates="agent")
 
 
 class AgentVersion(Base):
@@ -64,6 +65,7 @@ class AgentVersion(Base):
 
     agent: Mapped[AgentDefinition] = relationship(back_populates="versions")
     runs: Mapped[list["AgentRun"]] = relationship(back_populates="version")
+    run_batches: Mapped[list["RunBatch"]] = relationship(back_populates="version")
     labels: Mapped[list["VersionLabel"]] = relationship(
         back_populates="version",
         cascade="all, delete-orphan",
@@ -115,6 +117,18 @@ class AgentRun(Base):
         cascade="all, delete-orphan",
     )
     labels: Mapped[list["RunLabel"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+    batch_items: Mapped[list["RunBatchItem"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+    evaluations: Mapped[list["RunEvaluation"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
+    artifacts: Mapped[list["RunArtifact"]] = relationship(
         back_populates="run",
         cascade="all, delete-orphan",
     )
@@ -199,3 +213,112 @@ class AgentInputPreset(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
     agent: Mapped[AgentDefinition] = relationship(back_populates="input_presets")
+    batch_items: Mapped[list["RunBatchItem"]] = relationship(back_populates="preset")
+
+
+class RunBatch(Base):
+    __tablename__ = "run_batches"
+    __table_args__ = (
+        Index("ix_run_batches_agent_id_created_at", "agent_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    agent_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_definitions.id"),
+        nullable=False,
+    )
+    version_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_versions.id"),
+        nullable=False,
+    )
+    name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    agent: Mapped[AgentDefinition] = relationship(back_populates="run_batches")
+    version: Mapped[AgentVersion] = relationship(back_populates="run_batches")
+    items: Mapped[list["RunBatchItem"]] = relationship(
+        back_populates="batch",
+        cascade="all, delete-orphan",
+    )
+
+
+class RunBatchItem(Base):
+    __tablename__ = "run_batch_items"
+    __table_args__ = (
+        UniqueConstraint("batch_id", "run_id", name="uq_run_batch_items_batch_id_run_id"),
+        Index("ix_run_batch_items_batch_id", "batch_id"),
+        Index("ix_run_batch_items_run_id", "run_id"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    batch_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("run_batches.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    preset_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("agent_input_presets.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    batch: Mapped[RunBatch] = relationship(back_populates="items")
+    run: Mapped[AgentRun] = relationship(back_populates="batch_items")
+    preset: Mapped[AgentInputPreset | None] = relationship(back_populates="batch_items")
+
+
+class RunEvaluation(Base):
+    __tablename__ = "run_evaluations"
+    __table_args__ = (
+        Index("ix_run_evaluations_run_id_created_at", "run_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    evaluator_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    score: Mapped[float | None] = mapped_column(nullable=True)
+    passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expected_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    actual_json: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[AgentRun] = relationship(back_populates="evaluations")
+
+
+class RunArtifact(Base):
+    __tablename__ = "run_artifacts"
+    __table_args__ = (
+        Index("ix_run_artifacts_run_id_created_at", "run_id", "created_at"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    artifact_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    mime_type: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[AgentRun] = relationship(back_populates="artifacts")

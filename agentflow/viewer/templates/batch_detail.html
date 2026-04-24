@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Batch</h1>
+  <p><code>{{ batch.batch_id }}</code></p>
+</section>
+
+<section class="panel">
+  <h2>Batch Metadata</h2>
+  <dl class="meta">
+    <dt>Name</dt><dd>{{ batch.name or "-" }}</dd>
+    <dt>Status</dt><dd><span class="status status-{{ batch.status }}">{{ batch.status }}</span></dd>
+    <dt>Agent ID</dt><dd><a href="/agents/{{ batch.agent_id }}"><code>{{ batch.agent_id }}</code></a></dd>
+    <dt>Version ID</dt><dd><code>{{ batch.version_id }}</code></dd>
+    <dt>Run Count</dt><dd>{{ batch.item_count }}</dd>
+    <dt>Pending</dt><dd>{{ batch.pending_count }}</dd>
+    <dt>Running</dt><dd>{{ batch.running_count }}</dd>
+    <dt>Completed</dt><dd>{{ batch.completed_count }}</dd>
+    <dt>Failed</dt><dd>{{ batch.failed_count }}</dd>
+    <dt>First Started</dt><dd>{{ batch.first_started_at }}</dd>
+    <dt>Last Ended</dt><dd>{{ batch.last_ended_at }}</dd>
+    <dt>Elapsed Seconds</dt><dd>{{ batch.elapsed_seconds }}</dd>
+    <dt>Created</dt><dd>{{ batch.created_at }}</dd>
+    <dt>Updated</dt><dd>{{ batch.updated_at }}</dd>
+  </dl>
+</section>
+
+<section class="stats-grid" aria-label="Batch status summary">
+  <div class="stat"><span>Total</span><strong>{{ batch.item_count }}</strong></div>
+  <div class="stat"><span>Pending</span><strong>{{ batch.pending_count }}</strong></div>
+  <div class="stat"><span>Running</span><strong>{{ batch.running_count }}</strong></div>
+  <div class="stat"><span>Completed</span><strong>{{ batch.completed_count }}</strong></div>
+  <div class="stat"><span>Failed</span><strong>{{ batch.failed_count }}</strong></div>
+</section>
+
+<section class="stats-grid" aria-label="Batch evaluation summary">
+  <div class="stat"><span>Evaluated</span><strong>{{ evaluation_summary.evaluated_count }}</strong></div>
+  <div class="stat"><span>Passed</span><strong>{{ evaluation_summary.passed_count }}</strong></div>
+  <div class="stat"><span>Failed Eval</span><strong>{{ evaluation_summary.failed_count }}</strong></div>
+  <div class="stat"><span>Pass Rate</span><strong>{{ evaluation_summary.pass_rate }}</strong></div>
+</section>
+
+<section class="panel">
+  <h2>Member Runs</h2>
+  {% if items %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Run ID</th>
+          <th>Preset</th>
+          <th>Status</th>
+          <th>Attempts</th>
+          <th>Created</th>
+          <th>Started</th>
+          <th>Ended</th>
+          <th>Input Preview</th>
+          <th>Result Preview</th>
+          <th>Latest Eval</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for item in items %}
+        <tr>
+          <td><a href="/runs/{{ item.run_id }}"><code>{{ item.run_id }}</code></a></td>
+          <td>
+            {{ item.preset_name or "-" }}
+            {% if item.preset_id %}<br><code>{{ item.preset_id }}</code>{% endif %}
+          </td>
+          <td><span class="status status-{{ item.status }}">{{ item.status }}</span></td>
+          <td>{{ item.attempt_count }}/{{ item.max_attempts }}</td>
+          <td>{{ item.created_at }}</td>
+          <td>{{ item.started_at }}</td>
+          <td>{{ item.ended_at }}</td>
+          <td><code>{{ item.input_preview }}</code></td>
+          <td>{{ item.result_preview }}</td>
+          <td>
+            {% if item.latest_evaluation %}
+              {{ "pass" if item.latest_evaluation.passed else "fail" }} | {{ item.latest_evaluation.score }}<br>
+              {{ item.latest_evaluation.summary or "-" }}
+            {% else %}
+              -
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No member runs found.</p>
+  {% endif %}
+</section>
+{% endblock %}

@@ -8,7 +8,7 @@ from typing import Any
 from urllib.parse import parse_qs, quote
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from pydantic import ValidationError
@@ -27,6 +27,19 @@ from agentflow.services.agent_queries import (
     get_registered_agent,
     list_agent_versions,
     list_registered_agents,
+)
+from agentflow.services.artifact_service import (
+    ArtifactFileMissingError,
+    ArtifactRecord,
+    get_run_artifact,
+    list_run_artifacts,
+    resolve_artifact_file,
+)
+from agentflow.services.batch_service import get_batch, list_batches
+from agentflow.services.eval_service import (
+    get_batch_evaluation_summary,
+    list_latest_evaluations_for_runs,
+    list_run_evaluations,
 )
 from agentflow.services.label_service import (
     LabelDuplicateError,
@@ -301,6 +314,40 @@ def runs_index(
     )
 
 
+@app.get("/batches", response_class=HTMLResponse)
+def batches_index(request: Request) -> HTMLResponse:
+    batches = [_batch_summary_to_view(batch) for batch in list_batches()]
+    return templates.TemplateResponse(
+        request,
+        "batches.html",
+        {"page_title": "Batches", "batches": batches},
+    )
+
+
+@app.get("/batches/{batch_id}", response_class=HTMLResponse)
+def batch_detail(request: Request, batch_id: str) -> HTMLResponse:
+    parsed_batch_id = _parse_uuid(batch_id)
+    if parsed_batch_id is None:
+        return _not_found(request, "Batch not found")
+    batch = get_batch(parsed_batch_id)
+    if batch is None:
+        return _not_found(request, "Batch not found")
+    latest_evaluations = list_latest_evaluations_for_runs([item.run_id for item in batch.items])
+    return templates.TemplateResponse(
+        request,
+        "batch_detail.html",
+        {
+            "page_title": "Batch Detail",
+            "batch": _batch_summary_to_view(batch.summary),
+            "items": [
+                _batch_item_to_view(item, latest_evaluation=latest_evaluations.get(item.run_id))
+                for item in batch.items
+            ],
+            "evaluation_summary": _batch_evaluation_summary_to_view(get_batch_evaluation_summary(parsed_batch_id)),
+        },
+    )
+
+
 @app.get("/runs/compare", response_class=HTMLResponse)
 def compare_runs_page(request: Request, run_ids: str = "") -> HTMLResponse:
     parsed_run_ids = [run_id for run_id in (_parse_uuid(value.strip()) for value in run_ids.split(",")) if run_id]
@@ -342,11 +389,41 @@ def run_detail(request: Request, run_id: str) -> HTMLResponse:
             "run": _run_detail_to_view(run),
             "events": [_run_event_to_view(event) for event in events],
             "labels": [record.label for record in list_run_labels(parsed_run_id)],
+            "evaluations": [_evaluation_to_view(evaluation) for evaluation in list_run_evaluations(parsed_run_id)],
+            "artifacts": [_artifact_to_view(artifact) for artifact in (list_run_artifacts(parsed_run_id) or [])],
             "feedback": _feedback_from_request(request),
             "can_rerun": bool(run.resolved_config_json),
             "retry_eligible": retry_eligibility.eligible,
             "retry_ineligible_reason": retry_eligibility.reason,
         },
+    )
+
+
+@app.get("/runs/{run_id}/artifacts/{artifact_id}")
+def run_artifact(request: Request, run_id: str, artifact_id: str) -> Any:
+    parsed_run_id = _parse_uuid(run_id)
+    parsed_artifact_id = _parse_uuid(artifact_id)
+    if parsed_run_id is None or parsed_artifact_id is None:
+        return _not_found(request, "Artifact not found")
+
+    artifact = get_run_artifact(parsed_run_id, parsed_artifact_id)
+    if artifact is None:
+        return _not_found(request, "Artifact not found")
+
+    try:
+        path = resolve_artifact_file(artifact)
+    except ArtifactFileMissingError:
+        return _error_page(
+            request,
+            status_code=404,
+            title="Artifact File Missing",
+            message="The artifact metadata exists, but the local file is missing.",
+        )
+
+    return FileResponse(
+        path,
+        media_type=artifact.mime_type or "application/octet-stream",
+        filename=artifact.name,
     )
 
 
@@ -518,6 +595,88 @@ def _run_event_to_view(event: RunEventRecord) -> dict[str, Any]:
         "message": event.message,
         "payload_json": _format_json(event.payload_json),
         "created_at": _format_datetime(event.created_at),
+    }
+
+
+def _batch_summary_to_view(batch: Any) -> dict[str, Any]:
+    return {
+        "batch_id": str(batch.batch_id),
+        "agent_id": str(batch.agent_id),
+        "version_id": str(batch.version_id),
+        "name": batch.name,
+        "status": batch.status,
+        "item_count": batch.item_count,
+        "pending_count": batch.pending_count,
+        "running_count": batch.running_count,
+        "completed_count": batch.completed_count,
+        "failed_count": batch.failed_count,
+        "first_started_at": _format_datetime(batch.first_started_at),
+        "last_ended_at": _format_datetime(batch.last_ended_at),
+        "elapsed_seconds": f"{batch.elapsed_seconds:.3f}" if batch.elapsed_seconds is not None else "-",
+        "created_at": _format_datetime(batch.created_at),
+        "updated_at": _format_datetime(batch.updated_at),
+    }
+
+
+def _batch_item_to_view(item: Any, *, latest_evaluation: Any | None = None) -> dict[str, Any]:
+    return {
+        "item_id": str(item.item_id),
+        "batch_id": str(item.batch_id),
+        "run_id": str(item.run_id),
+        "preset_id": str(item.preset_id) if item.preset_id is not None else None,
+        "preset_name": item.preset_name,
+        "status": item.status,
+        "attempt_count": item.attempt_count,
+        "max_attempts": item.max_attempts,
+        "input_preview": _summarize_json(item.input_json),
+        "result_preview": item.result_preview or "-",
+        "latest_evaluation": _evaluation_to_view(latest_evaluation) if latest_evaluation is not None else None,
+        "started_at": _format_datetime(item.started_at),
+        "ended_at": _format_datetime(item.ended_at),
+        "created_at": _format_datetime(item.created_at),
+    }
+
+
+def _evaluation_to_view(evaluation: Any) -> dict[str, Any]:
+    return {
+        "evaluation_id": str(evaluation.evaluation_id),
+        "run_id": str(evaluation.run_id),
+        "evaluator_type": evaluation.evaluator_type,
+        "status": evaluation.status,
+        "passed": evaluation.passed,
+        "score": evaluation.score,
+        "summary": evaluation.summary,
+        "expected_json": _format_json(evaluation.expected_json),
+        "actual_json": _format_json(evaluation.actual_json),
+        "created_at": _format_datetime(evaluation.created_at),
+    }
+
+
+def _artifact_to_view(artifact: ArtifactRecord) -> dict[str, Any]:
+    return {
+        "artifact_id": str(artifact.artifact_id),
+        "run_id": str(artifact.run_id),
+        "artifact_type": artifact.artifact_type,
+        "name": artifact.name,
+        "mime_type": artifact.mime_type or "-",
+        "size_bytes": artifact.size_bytes if artifact.size_bytes is not None else "-",
+        "description": artifact.description,
+        "created_at": _format_datetime(artifact.created_at),
+    }
+
+
+def _batch_evaluation_summary_to_view(summary: Any) -> dict[str, Any]:
+    pass_rate = (
+        (summary.passed_count / summary.evaluated_count) * 100
+        if summary.evaluated_count
+        else None
+    )
+    return {
+        "evaluated_count": summary.evaluated_count,
+        "passed_count": summary.passed_count,
+        "failed_count": summary.failed_count,
+        "pass_rate": f"{pass_rate:.1f}%" if pass_rate is not None else "-",
+        "latest_created_at": _format_datetime(summary.latest_created_at),
     }
 
 

@@ -49,6 +49,39 @@ from agentflow.services.agent_queries import (
     list_agent_versions,
     list_registered_agents,
 )
+from agentflow.services.artifact_service import (
+    ArtifactFileMissingError,
+    ArtifactNotFoundError,
+    ArtifactRecord,
+    ArtifactRunNotFoundError,
+    get_artifact,
+    list_run_artifacts,
+    resolve_artifact_file,
+)
+from agentflow.services.batch_service import (
+    BatchAgentNotFoundError,
+    BatchDetail,
+    BatchInvalidError,
+    BatchPresetAgentMismatchError,
+    BatchPresetNotFoundError,
+    BatchSummary,
+    BatchVersionAgentMismatchError,
+    BatchVersionNotFoundError,
+    create_batch_from_presets,
+    get_batch,
+    list_batches,
+)
+from agentflow.services.eval_service import (
+    BatchEvaluationResult,
+    EvalBatchNotFoundError,
+    EvalInvalidError,
+    EvalRunIneligibleError,
+    EvalRunNotFoundError,
+    RunEvaluationRecord,
+    evaluate_batch,
+    evaluate_run,
+    list_run_evaluations,
+)
 from agentflow.services.label_service import (
     LabelDuplicateError,
     LabelInvalidError,
@@ -179,6 +212,40 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     preset_show.add_argument("preset_id", help="UUID of the preset to show.")
     preset_run = preset_subparsers.add_parser("run", help="Create a pending run from an input preset.")
     preset_run.add_argument("preset_id", help="UUID of the preset to run.")
+
+    batch_parser = subparsers.add_parser("batch", help="Create and inspect batches of preset-backed runs.")
+    batch_subparsers = batch_parser.add_subparsers(dest="batch_command", required=True)
+    batch_create = batch_subparsers.add_parser("create", help="Create a batch from multiple input presets.")
+    batch_create.add_argument("agent_id", help="UUID of the agent to run.")
+    batch_create.add_argument("--preset-ids", required=True, help="Comma-separated preset UUIDs.")
+    batch_create.add_argument("--version-id", help="Optional exact agent version UUID to pin.")
+    batch_create.add_argument("--name", help="Optional batch name.")
+    batch_list = batch_subparsers.add_parser("list", help="List run batches.")
+    batch_list.add_argument("agent_id", nargs="?", help="Optional agent UUID to filter by.")
+    batch_show = batch_subparsers.add_parser("show", help="Show one run batch.")
+    batch_show.add_argument("batch_id", help="UUID of the batch to show.")
+
+    eval_parser = subparsers.add_parser("eval", help="Run and inspect evaluations.")
+    eval_subparsers = eval_parser.add_subparsers(dest="eval_command", required=True)
+    eval_run = eval_subparsers.add_parser("run", help="Evaluate one completed run.")
+    eval_run.add_argument("run_id", help="UUID of the run to evaluate.")
+    eval_run.add_argument("--evaluator", default="exact_match", help="Evaluator type. Defaults to exact_match.")
+    eval_run.add_argument("--expected-text", required=True, help="Expected text for exact-match evaluation.")
+    eval_show = eval_subparsers.add_parser("show", help="Show persisted evaluations for one run.")
+    eval_show.add_argument("run_id", help="UUID of the run whose evaluations should be listed.")
+    eval_batch = eval_subparsers.add_parser("batch", help="Evaluate completed runs in a batch.")
+    eval_batch.add_argument("batch_id", help="UUID of the batch to evaluate.")
+    eval_batch.add_argument("--evaluator", default="exact_match", help="Evaluator type. Defaults to exact_match.")
+    eval_batch.add_argument("--expected-text", required=True, help="Expected text for exact-match evaluation.")
+
+    artifact_parser = subparsers.add_parser("artifact", help="Inspect run artifacts.")
+    artifact_subparsers = artifact_parser.add_subparsers(dest="artifact_command", required=True)
+    artifact_list = artifact_subparsers.add_parser("list", help="List artifacts for a run.")
+    artifact_list.add_argument("run_id", help="UUID of the run whose artifacts should be listed.")
+    artifact_show = artifact_subparsers.add_parser("show", help="Show one artifact metadata record.")
+    artifact_show.add_argument("artifact_id", help="UUID of the artifact to show.")
+    artifact_cat = artifact_subparsers.add_parser("cat", help="Print a text or JSON artifact.")
+    artifact_cat.add_argument("artifact_id", help="UUID of the artifact to print.")
 
     subparsers.add_parser("worker", help="Start the background run worker.")
 
@@ -368,6 +435,14 @@ def parse_preset_id(value: str) -> uuid.UUID:
     return parse_uuid_value(value, label="preset_id")
 
 
+def parse_batch_id(value: str) -> uuid.UUID:
+    return parse_uuid_value(value, label="batch_id")
+
+
+def parse_artifact_id(value: str) -> uuid.UUID:
+    return parse_uuid_value(value, label="artifact_id")
+
+
 def parse_uuid_value(value: str, *, label: str) -> uuid.UUID:
     try:
         return uuid.UUID(value)
@@ -396,6 +471,18 @@ def parse_json_object(value: str, *, label: str) -> dict[str, object]:
     parsed = parse_optional_json_object(value, label=label)
     if parsed is None:
         raise ValueError(f"Invalid {label}. Expected a JSON object.")
+    return parsed
+
+
+def parse_uuid_csv(value: str, *, label: str) -> list[uuid.UUID]:
+    parsed: list[uuid.UUID] = []
+    for part in value.split(","):
+        item = part.strip()
+        if not item:
+            continue
+        parsed.append(parse_uuid_value(item, label=label))
+    if not parsed:
+        raise ValueError(f"Invalid {label}. Expected at least one UUID.")
     return parsed
 
 
@@ -659,6 +746,137 @@ def print_preset_detail(preset: InputPresetRecord) -> None:
     print()
     print("input_json:")
     print(json.dumps(preset.input_json, indent=2, sort_keys=True))
+
+
+def print_batches_table(batches: Sequence[BatchSummary]) -> None:
+    rows = [
+        (
+            batch.batch_id,
+            batch.agent_id,
+            batch.version_id,
+            batch.name or "-",
+            batch.status,
+            batch.item_count,
+            f"{batch.completed_count}/{batch.failed_count}",
+            format_timestamp(batch.created_at),
+        )
+        for batch in batches
+    ]
+    print(render_table(("batch_id", "agent_id", "version_id", "name", "status", "runs", "done/failed", "created_at"), rows))
+
+
+def print_batch_detail(batch: BatchDetail) -> None:
+    summary = batch.summary
+    print_key_value("batch_id", summary.batch_id)
+    print_key_value("agent_id", summary.agent_id)
+    print_key_value("version_id", summary.version_id)
+    print_key_value("name", summary.name or "-")
+    print_key_value("status", summary.status)
+    print_key_value("run_count", summary.item_count)
+    print_key_value("pending_count", summary.pending_count)
+    print_key_value("running_count", summary.running_count)
+    print_key_value("completed_count", summary.completed_count)
+    print_key_value("failed_count", summary.failed_count)
+    print_key_value("first_started_at", format_optional_timestamp(summary.first_started_at))
+    print_key_value("last_ended_at", format_optional_timestamp(summary.last_ended_at))
+    print_key_value(
+        "elapsed_seconds",
+        f"{summary.elapsed_seconds:.3f}" if summary.elapsed_seconds is not None else "-",
+    )
+    print_key_value("created_at", format_timestamp(summary.created_at))
+    print_key_value("updated_at", format_timestamp(summary.updated_at))
+    print()
+    rows = [
+        (
+            item.run_id,
+            item.preset_id or "-",
+            item.preset_name or "-",
+            item.status,
+            f"{item.attempt_count}/{item.max_attempts}",
+            format_timestamp(item.created_at),
+            format_optional_timestamp(item.started_at),
+            format_optional_timestamp(item.ended_at),
+            summarize_text(item.result_preview, width=80),
+        )
+        for item in batch.items
+    ]
+    print(
+        render_table(
+            ("run_id", "preset_id", "preset_name", "status", "attempts", "created_at", "started_at", "ended_at", "result_preview"),
+            rows,
+        )
+    )
+
+
+def print_evaluation_record(evaluation: RunEvaluationRecord) -> None:
+    print_key_value("evaluation_id", evaluation.evaluation_id)
+    print_key_value("run_id", evaluation.run_id)
+    print_key_value("evaluator_type", evaluation.evaluator_type)
+    print_key_value("status", evaluation.status)
+    print_key_value("passed", evaluation.passed)
+    print_key_value("score", evaluation.score if evaluation.score is not None else "-")
+    print_key_value("summary", evaluation.summary or "-")
+    print_key_value("created_at", format_timestamp(evaluation.created_at))
+
+
+def print_evaluations_table(evaluations: Sequence[RunEvaluationRecord]) -> None:
+    rows = [
+        (
+            evaluation.evaluation_id,
+            evaluation.evaluator_type,
+            evaluation.status,
+            evaluation.passed,
+            evaluation.score if evaluation.score is not None else "-",
+            summarize_text(evaluation.summary, width=50),
+            format_timestamp(evaluation.created_at),
+        )
+        for evaluation in evaluations
+    ]
+    print(render_table(("evaluation_id", "evaluator_type", "status", "passed", "score", "summary", "created_at"), rows))
+
+
+def print_batch_evaluation_result(result: BatchEvaluationResult) -> None:
+    print_key_value("batch_id", result.batch_id)
+    print_key_value("evaluated_count", result.evaluated_count)
+    print_key_value("passed_count", result.passed_count)
+    print_key_value("failed_count", result.failed_count)
+    print_key_value("skipped_count", result.skipped_count)
+    if result.evaluations:
+        print()
+        print_evaluations_table(result.evaluations)
+
+
+def print_artifacts_table(artifacts: Sequence[ArtifactRecord]) -> None:
+    rows = [
+        (
+            artifact.artifact_id,
+            artifact.name,
+            artifact.artifact_type,
+            artifact.mime_type or "-",
+            artifact.size_bytes if artifact.size_bytes is not None else "-",
+            format_timestamp(artifact.created_at),
+        )
+        for artifact in artifacts
+    ]
+    print(render_table(("artifact_id", "name", "type", "mime_type", "size_bytes", "created_at"), rows))
+
+
+def print_artifact_detail(artifact: ArtifactRecord) -> None:
+    print_key_value("artifact_id", artifact.artifact_id)
+    print_key_value("run_id", artifact.run_id)
+    print_key_value("name", artifact.name)
+    print_key_value("artifact_type", artifact.artifact_type)
+    print_key_value("file_path", artifact.file_path)
+    print_key_value("mime_type", artifact.mime_type or "-")
+    print_key_value("size_bytes", artifact.size_bytes if artifact.size_bytes is not None else "-")
+    print_key_value("description", artifact.description or "-")
+    print_key_value("created_at", format_timestamp(artifact.created_at))
+    try:
+        resolve_artifact_file(artifact)
+        exists = True
+    except ArtifactFileMissingError:
+        exists = False
+    print_key_value("file_exists", exists)
 
 
 def format_database_error_message(exc: SQLAlchemyError) -> str:
@@ -1145,6 +1363,152 @@ def run_preset_command(args: argparse.Namespace) -> int:
     return 1
 
 
+def run_batch_command(args: argparse.Namespace) -> int:
+    try:
+        if args.batch_command == "create":
+            agent_id = parse_agent_id(args.agent_id)
+            preset_ids = parse_uuid_csv(args.preset_ids, label="preset_id")
+            version_id = parse_version_id(args.version_id) if args.version_id is not None else None
+            batch = create_batch_from_presets(
+                agent_id,
+                preset_ids=preset_ids,
+                version_id=version_id,
+                name=args.name,
+            )
+            print("Batch created")
+            print_batch_detail(batch)
+            return 0
+
+        if args.batch_command == "list":
+            agent_id = parse_agent_id(args.agent_id) if args.agent_id is not None else None
+            batches = list_batches(agent_id)
+            if not batches:
+                print("No batches found.")
+                return 0
+            print_batches_table(batches)
+            return 0
+
+        if args.batch_command == "show":
+            batch_id = parse_batch_id(args.batch_id)
+            batch = get_batch(batch_id)
+            if batch is None:
+                print(f"Batch not found: {batch_id}", file=sys.stderr)
+                return 1
+            print_batch_detail(batch)
+            return 0
+    except (
+        BatchAgentNotFoundError,
+        BatchInvalidError,
+        BatchPresetAgentMismatchError,
+        BatchPresetNotFoundError,
+        BatchVersionAgentMismatchError,
+        BatchVersionNotFoundError,
+        ValueError,
+    ) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Batch command")
+
+    print("Unknown batch command.", file=sys.stderr)
+    return 1
+
+
+def run_eval_command(args: argparse.Namespace) -> int:
+    try:
+        if args.eval_command == "run":
+            run_id = parse_run_id(args.run_id)
+            evaluation = evaluate_run(
+                run_id,
+                evaluator_type=args.evaluator,
+                expected_text=args.expected_text,
+            )
+            print("Evaluation created")
+            print_evaluation_record(evaluation)
+            return 0
+
+        if args.eval_command == "show":
+            run_id = parse_run_id(args.run_id)
+            run = get_agent_run(run_id)
+            if run is None:
+                print(f"Run not found: {run_id}", file=sys.stderr)
+                return 1
+            evaluations = list_run_evaluations(run_id)
+            if not evaluations:
+                print("No evaluations found.")
+                return 0
+            print_key_value("run_id", run_id)
+            print()
+            print_evaluations_table(evaluations)
+            return 0
+
+        if args.eval_command == "batch":
+            batch_id = parse_batch_id(args.batch_id)
+            result = evaluate_batch(
+                batch_id,
+                evaluator_type=args.evaluator,
+                expected_text=args.expected_text,
+            )
+            print("Batch evaluation completed")
+            print_batch_evaluation_result(result)
+            return 0
+    except (EvalBatchNotFoundError, EvalInvalidError, EvalRunIneligibleError, EvalRunNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Eval command")
+
+    print("Unknown eval command.", file=sys.stderr)
+    return 1
+
+
+def run_artifact_command(args: argparse.Namespace) -> int:
+    try:
+        if args.artifact_command == "list":
+            run_id = parse_run_id(args.run_id)
+            artifacts = list_run_artifacts(run_id)
+            if artifacts is None:
+                print(f"Run not found: {run_id}", file=sys.stderr)
+                return 1
+            if not artifacts:
+                print("No artifacts found.")
+                return 0
+            print_key_value("run_id", run_id)
+            print()
+            print_artifacts_table(artifacts)
+            return 0
+
+        if args.artifact_command == "show":
+            artifact_id = parse_artifact_id(args.artifact_id)
+            artifact = get_artifact(artifact_id)
+            if artifact is None:
+                print(f"Artifact not found: {artifact_id}", file=sys.stderr)
+                return 1
+            print_artifact_detail(artifact)
+            return 0
+
+        if args.artifact_command == "cat":
+            artifact_id = parse_artifact_id(args.artifact_id)
+            artifact = get_artifact(artifact_id)
+            if artifact is None:
+                print(f"Artifact not found: {artifact_id}", file=sys.stderr)
+                return 1
+            if artifact.mime_type not in {"application/json", "text/plain"}:
+                print(f"Artifact is not a text/json artifact: {artifact.mime_type}", file=sys.stderr)
+                return 1
+            path = resolve_artifact_file(artifact)
+            print(path.read_text(encoding="utf-8"))
+            return 0
+    except (ArtifactFileMissingError, ArtifactNotFoundError, ArtifactRunNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    except Exception as exc:
+        return handle_cli_query_error(exc, action="Artifact command")
+
+    print("Unknown artifact command.", file=sys.stderr)
+    return 1
+
+
 def run_worker() -> int:
     try:
         start_worker_loop()
@@ -1204,6 +1568,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return run_version_label(args.label_command, args.version_id, args.label)
     if args.command == "preset":
         return run_preset_command(args)
+    if args.command == "batch":
+        return run_batch_command(args)
+    if args.command == "eval":
+        return run_eval_command(args)
+    if args.command == "artifact":
+        return run_artifact_command(args)
     if args.command == "worker":
         return run_worker()
     if args.command == "view":

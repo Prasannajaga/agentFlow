@@ -73,6 +73,72 @@
   </form>
 </section>
 
+<section class="panel">
+  <h2>Evaluations</h2>
+  {% if evaluations %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Evaluator</th>
+          <th>Passed</th>
+          <th>Score</th>
+          <th>Summary</th>
+          <th>Created</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for evaluation in evaluations %}
+        <tr>
+          <td>{{ evaluation.evaluator_type }}</td>
+          <td>{{ evaluation.passed }}</td>
+          <td>{{ evaluation.score }}</td>
+          <td>{{ evaluation.summary or "-" }}</td>
+          <td>{{ evaluation.created_at }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No evaluations found for this run.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
+  <h2>Artifacts</h2>
+  {% if artifacts %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>Type</th>
+          <th>MIME</th>
+          <th>Size</th>
+          <th>Created</th>
+          <th>Open</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for artifact in artifacts %}
+        <tr>
+          <td>{{ artifact.name }}</td>
+          <td>{{ artifact.artifact_type }}</td>
+          <td>{{ artifact.mime_type }}</td>
+          <td>{{ artifact.size_bytes }}</td>
+          <td>{{ artifact.created_at }}</td>
+          <td><a href="/runs/{{ run.run_id }}/artifacts/{{ artifact.artifact_id }}">Open</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No artifacts found for this run.</p>
+  {% endif %}
+</section>
+
 <section class="grid-two">
   <div class="panel">
     <h2>Input JSON</h2>

@@ -15,6 +15,7 @@ DATABASE_PORT_ENV = "DATABASE_PORT"
 DATABASE_NAME_ENV = "DATABASE_NAME"
 DATABASE_USER_ENV = "DATABASE_USER"
 DATABASE_PASSWORD_ENV = "DATABASE_PASSWORD"
+ARTIFACT_STORAGE_DIR_ENV = "AGENTFLOW_ARTIFACT_STORAGE_DIR"
 
 DEFAULT_ENV_FILE = Path(".env")
 DEFAULT_DATABASE_DRIVER = "postgresql+psycopg"
@@ -205,3 +206,9 @@ def get_database_url() -> str:
 def clear_settings_cache() -> None:
     load_env_file.cache_clear()
     get_settings.cache_clear()
+
+
+def get_artifact_storage_dir() -> Path:
+    load_env_file()
+    configured = os.environ.get(ARTIFACT_STORAGE_DIR_ENV, "").strip()
+    return Path(configured) if configured else Path("data") / "artifacts"

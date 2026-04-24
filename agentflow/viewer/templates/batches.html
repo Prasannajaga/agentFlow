@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+
+{% block content %}
+<section class="page-head">
+  <h1>Batches</h1>
+  <p>{{ batches|length }} run batch{{ "" if batches|length == 1 else "es" }}.</p>
+</section>
+
+{% if batches %}
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Batch ID</th>
+        <th>Name</th>
+        <th>Status</th>
+        <th>Summary</th>
+        <th>Agent ID</th>
+        <th>Version ID</th>
+        <th>Runs</th>
+        <th>Created</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for batch in batches %}
+      <tr>
+        <td><a href="/batches/{{ batch.batch_id }}"><code>{{ batch.batch_id }}</code></a></td>
+        <td>{{ batch.name or "-" }}</td>
+        <td><span class="status status-{{ batch.status }}">{{ batch.status }}</span></td>
+        <td>{{ batch.completed_count }} completed | {{ batch.failed_count }} failed | {{ batch.running_count }} running | {{ batch.pending_count }} pending</td>
+        <td><a href="/agents/{{ batch.agent_id }}"><code>{{ batch.agent_id }}</code></a></td>
+        <td><code>{{ batch.version_id }}</code></td>
+        <td>{{ batch.item_count }}</td>
+        <td>{{ batch.created_at }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% else %}
+<p class="empty">No batches found.</p>
+{% endif %}
+{% endblock %}

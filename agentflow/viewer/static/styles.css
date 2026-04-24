@@ -371,6 +371,11 @@ tr:last-child td {
   color: var(--failed);
 }
 
+.status-partial {
+  background: #f3e8ff;
+  color: #6b21a8;
+}
+
 .timeline {
   margin: 0;
   padding-left: 24px;
