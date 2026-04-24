@@ -139,6 +139,17 @@ pre {
   gap: 10px;
 }
 
+.action-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.action-row form {
+  margin: 0;
+}
+
 .button {
   display: inline-flex;
   align-items: center;
@@ -149,6 +160,39 @@ pre {
   background: var(--accent-soft);
   color: #134e4a;
   font-weight: 600;
+  cursor: pointer;
+}
+
+.button:disabled {
+  border-color: var(--line);
+  background: #eef1f4;
+  color: var(--muted);
+  cursor: not-allowed;
+}
+
+.hint {
+  color: var(--muted);
+}
+
+.notice {
+  margin-bottom: 16px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--panel);
+  font-weight: 600;
+}
+
+.notice-success {
+  border-color: #9ae6b4;
+  background: #ecfdf3;
+  color: var(--completed);
+}
+
+.notice-error {
+  border-color: #fda29b;
+  background: #fff1f0;
+  color: var(--failed);
 }
 
 .table-wrap {

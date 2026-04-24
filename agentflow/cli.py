@@ -30,7 +30,7 @@ from agentflow.config import (
     redact_database_url,
 )
 from agentflow.services.db_migrations import apply_sql_migrations
-from agentflow.services.agent_registry import register_agent
+from agentflow.services.agent_registry import AgentRegistrationAgentNotFoundError, register_agent
 from agentflow.services.agent_runner import (
     AgentNotFoundError,
     AgentRunNotFoundError,
@@ -86,9 +86,15 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
     for command_name, help_text in (
         ("validate", "Validate an agent YAML file."),
         ("create", "Phase 1 compatibility alias that validates an agent YAML file."),
-        ("register", "Validate an agent YAML file and register it in Postgres."),
     ):
         _add_agent_file_command(subparsers, command_name=command_name, help_text=help_text)
+
+    register_parser = subparsers.add_parser("register", help="Validate an agent YAML file and register it in Postgres.")
+    register_parser.add_argument("path", type=Path, help="Path to an agent YAML file.")
+    register_parser.add_argument(
+        "--agent-id",
+        help="Existing agent UUID to append a new immutable version to.",
+    )
 
     subparsers.add_parser("list", help="List registered agents.")
 
@@ -748,9 +754,10 @@ def run_validate(path: Path) -> int:
     return 0
 
 
-def run_register(path: Path) -> int:
+def run_register(path: Path, *, agent_id_text: str | None = None) -> int:
     try:
-        result = register_agent(path)
+        agent_id = parse_agent_id(agent_id_text) if agent_id_text is not None else None
+        result = register_agent(path, agent_id=agent_id)
     except FileNotFoundError:
         print(f"Registration failed: file not found: {path}", file=sys.stderr)
         return 1
@@ -765,6 +772,12 @@ def run_register(path: Path) -> int:
         print(f"Registration failed for {path}", file=sys.stderr)
         for error in exc.errors():
             print(format_validation_error(error), file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"Registration failed: {exc}", file=sys.stderr)
+        return 1
+    except AgentRegistrationAgentNotFoundError as exc:
+        print(f"Registration failed: {exc}", file=sys.stderr)
         return 1
     except ConfigurationError as exc:
         print("Registration failed: missing configuration.", file=sys.stderr)
@@ -976,7 +989,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command in {"validate", "create"}:
         return run_validate(args.path)
     if args.command == "register":
-        return run_register(args.path)
+        return run_register(args.path, agent_id_text=args.agent_id)
     if args.command == "list":
         return run_list_agents()
     if args.command == "show":

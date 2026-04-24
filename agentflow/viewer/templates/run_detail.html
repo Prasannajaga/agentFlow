@@ -6,6 +6,35 @@
   <p><code>{{ run.run_id }}</code></p>
 </section>
 
+{% if feedback.message %}
+<div class="notice notice-success">{{ feedback.message }}</div>
+{% endif %}
+{% if feedback.error %}
+<div class="notice notice-error">{{ feedback.error }}</div>
+{% endif %}
+
+<section class="panel">
+  <h2>Actions</h2>
+  <div class="action-row">
+    {% if can_rerun %}
+    <form method="post" action="/runs/{{ run.run_id }}/rerun">
+      <button class="button" type="submit">Rerun from snapshot</button>
+    </form>
+    {% else %}
+    <button class="button" type="button" disabled>Rerun unavailable</button>
+    {% endif %}
+
+    {% if retry_eligible %}
+    <form method="post" action="/runs/{{ run.run_id }}/retry">
+      <button class="button" type="submit">Queue retry</button>
+    </form>
+    {% else %}
+    <button class="button" type="button" disabled>Retry unavailable</button>
+    <span class="hint">{{ retry_ineligible_reason }}</span>
+    {% endif %}
+  </div>
+</section>
+
 <section class="panel">
   <h2>Run Metadata</h2>
   <dl class="meta">

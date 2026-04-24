@@ -32,6 +32,7 @@
         <tr>
           <th>Version</th>
           <th>Version ID</th>
+          <th>Latest</th>
           <th>Config Hash</th>
           <th>Created</th>
         </tr>
@@ -41,6 +42,7 @@
         <tr>
           <td>v{{ version.version_number }}</td>
           <td><code>{{ version.version_id }}</code></td>
+          <td>{% if version.is_latest %}<span class="status status-completed">latest</span>{% else %}-{% endif %}</td>
           <td><code>{{ version.config_hash }}</code></td>
           <td>{{ version.created_at }}</td>
         </tr>

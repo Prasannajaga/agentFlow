@@ -5,14 +5,16 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import FastAPI, Query, Request
-from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.exc import SQLAlchemyError
 
 from agentflow.config import ConfigurationError
+from agentflow.services.agent_runner import AgentRunNotFoundError, AgentRunSnapshotMissingError, rerun_agent_run
 from agentflow.services.agent_queries import (
     AgentDetail,
     AgentSummary,
@@ -22,6 +24,12 @@ from agentflow.services.agent_queries import (
     list_registered_agents,
 )
 from agentflow.services.run_events import RunEventRecord, list_run_events
+from agentflow.services.run_actions import (
+    RunActionNotFoundError,
+    RunRetryNotEligibleError,
+    get_manual_retry_eligibility,
+    manual_retry_run,
+)
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.stats_queries import DashboardStats, get_dashboard_stats
 
@@ -79,14 +87,21 @@ def agent_detail(request: Request, agent_id: str) -> HTMLResponse:
     if agent is None:
         return _not_found(request, "Agent not found")
 
-    versions = list_agent_versions(parsed_agent_id) or []
+    latest_version_id = agent.latest_version.version_id if agent.latest_version is not None else None
+    versions = [
+        {
+            **_version_summary_to_view(version),
+            "is_latest": version.version_id == latest_version_id,
+        }
+        for version in (list_agent_versions(parsed_agent_id) or [])
+    ]
     return templates.TemplateResponse(
         request,
         "agent_detail.html",
         {
             "page_title": "Agent Detail",
             "agent": _agent_detail_to_view(agent),
-            "versions": [_version_summary_to_view(version) for version in versions],
+            "versions": versions,
         },
     )
 
@@ -115,6 +130,7 @@ def run_detail(request: Request, run_id: str) -> HTMLResponse:
         return _not_found(request, "Run not found")
 
     events = list_run_events(parsed_run_id)
+    retry_eligibility = get_manual_retry_eligibility(run)
     return templates.TemplateResponse(
         request,
         "run_detail.html",
@@ -122,8 +138,44 @@ def run_detail(request: Request, run_id: str) -> HTMLResponse:
             "page_title": "Run Detail",
             "run": _run_detail_to_view(run),
             "events": [_run_event_to_view(event) for event in events],
+            "feedback": _feedback_from_request(request),
+            "can_rerun": bool(run.resolved_config_json),
+            "retry_eligible": retry_eligibility.eligible,
+            "retry_ineligible_reason": retry_eligibility.reason,
         },
     )
+
+
+@app.post("/runs/{run_id}/rerun")
+def rerun_action(request: Request, run_id: str) -> Any:
+    parsed_run_id = _parse_uuid(run_id)
+    if parsed_run_id is None:
+        return _not_found(request, "Run not found")
+
+    try:
+        prepared_run = rerun_agent_run(parsed_run_id)
+    except AgentRunNotFoundError:
+        return _not_found(request, "Run not found")
+    except AgentRunSnapshotMissingError as exc:
+        return _redirect_to_run(parsed_run_id, error=str(exc))
+
+    return _redirect_to_run(prepared_run.run.run_id, message="Rerun created successfully")
+
+
+@app.post("/runs/{run_id}/retry")
+def retry_action(request: Request, run_id: str) -> Any:
+    parsed_run_id = _parse_uuid(run_id)
+    if parsed_run_id is None:
+        return _not_found(request, "Run not found")
+
+    try:
+        retried_run = manual_retry_run(parsed_run_id)
+    except RunActionNotFoundError:
+        return _not_found(request, "Run not found")
+    except RunRetryNotEligibleError as exc:
+        return _redirect_to_run(parsed_run_id, error=exc.reason)
+
+    return _redirect_to_run(retried_run.run_id, message="Run queued for retry")
 
 
 def stats_to_view(stats: DashboardStats) -> dict[str, int]:
@@ -255,6 +307,25 @@ def _parse_uuid(value: str) -> uuid.UUID | None:
         return uuid.UUID(value)
     except ValueError:
         return None
+
+
+def _feedback_from_request(request: Request) -> dict[str, str | None]:
+    return {
+        "message": request.query_params.get("message"),
+        "error": request.query_params.get("error"),
+    }
+
+
+def _redirect_to_run(run_id: uuid.UUID, *, message: str | None = None, error: str | None = None) -> RedirectResponse:
+    target = f"/runs/{run_id}"
+    query_parts: list[str] = []
+    if message:
+        query_parts.append(f"message={quote(message, safe='')}")
+    if error:
+        query_parts.append(f"error={quote(error, safe='')}")
+    if query_parts:
+        target = f"{target}?{'&'.join(query_parts)}"
+    return RedirectResponse(target, status_code=303)
 
 
 def _not_found(request: Request, message: str) -> HTMLResponse:
