@@ -1,24 +1,23 @@
-name: text-agent-openai-compatible
+name: text-agent-echo
 version: 1
-description: Simple research agent using an OpenAI-compatible chat-completions endpoint
+description: Simple research agent with the built-in echo tool enabled
 
 provider:
-  type: openai_compatible
-  model: gpt-4.1-mini
-  base_url: https://api.openai.com/v1
-  api_key_ref: env:OPENAI_API_KEY
+  type: fake
+  model: stub-model
 
 system_prompt: |
   You are a focused research agent.
 
 runtime:
   max_steps: 12
-  timeout_seconds: 60
+  timeout_seconds: 900
   retry:
     max_attempts: 3
     backoff_seconds: 5
 
-tools: []
+tools:
+  - echo
 
 task:
   type: research

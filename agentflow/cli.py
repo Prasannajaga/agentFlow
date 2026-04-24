@@ -95,6 +95,10 @@ def build_parser(prog: str) -> argparse.ArgumentParser:
 
     run_parser = subparsers.add_parser("run", help="Create one pending agent run for background execution.")
     run_parser.add_argument("agent_id", help="UUID of the agent to run.")
+    run_parser.add_argument(
+        "--input-json",
+        help="Optional JSON object to store with the run and make available during execution.",
+    )
 
     subparsers.add_parser("runs", help="List agent runs.")
 
@@ -284,6 +288,23 @@ def parse_uuid_value(value: str, *, label: str) -> uuid.UUID:
         return uuid.UUID(value)
     except ValueError as exc:
         raise ValueError(f"Invalid {label} '{value}'. Expected a UUID.") from exc
+
+
+def parse_optional_json_object(value: str | None, *, label: str) -> dict[str, object] | None:
+    if value is None:
+        return None
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Invalid {label}. Expected valid JSON: {exc.msg}.") from exc
+
+    if parsed is None:
+        return None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"Invalid {label}. Expected a JSON object.")
+
+    return parsed
 
 
 def format_timestamp(value: datetime) -> str:
@@ -755,10 +776,11 @@ def run_list_agent_versions(agent_id_text: str) -> int:
     return 0
 
 
-def run_run_agent(agent_id_text: str) -> int:
+def run_run_agent(agent_id_text: str, *, input_json_text: str | None = None) -> int:
     try:
         agent_id = parse_agent_id(agent_id_text)
-        prepared_run = create_run_for_agent(agent_id)
+        input_json = parse_optional_json_object(input_json_text, label="input_json")
+        prepared_run = create_run_for_agent(agent_id, input_json=input_json)
     except AgentNotFoundError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -852,7 +874,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "versions":
         return run_list_agent_versions(args.agent_id)
     if args.command == "run":
-        return run_run_agent(args.agent_id)
+        return run_run_agent(args.agent_id, input_json_text=args.input_json)
     if args.command == "runs":
         return run_list_runs()
     if args.command == "run-show":

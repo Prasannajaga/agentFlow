@@ -30,6 +30,10 @@ from agentflow.services.run_queries import (
     mark_agent_run_running,
 )
 from agentflow.services.run_events import (
+    RUN_EVENT_TOOL_EXECUTION_COMPLETED,
+    RUN_EVENT_TOOL_EXECUTION_FAILED,
+    RUN_EVENT_TOOL_EXECUTION_STARTED,
+    RUN_EVENT_TOOLS_VALIDATED,
     RUN_EVENT_PROVIDER_EXECUTION_FAILED,
     RUN_EVENT_PROVIDER_EXECUTION_COMPLETED,
     RUN_EVENT_PROVIDER_REQUEST_PREPARED,
@@ -40,6 +44,9 @@ from agentflow.services.run_events import (
     RunEventCreate,
     record_run_event,
 )
+from agentflow.tools.base import ToolError, ToolExecutionError, ToolInvocationRequest, ToolResult
+from agentflow.tools.echo import ECHO_TOOL_NAME, build_echo_input, preview_echo_result
+from agentflow.tools.registry import get_tool_adapter, validate_tool_names
 
 RunExecutor = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -81,6 +88,7 @@ class PreparedAgentRun:
 def create_run_for_agent(
     agent_id: uuid.UUID,
     *,
+    input_json: dict[str, Any] | None = None,
     session_factory: sessionmaker[Session] | None = None,
 ) -> PreparedAgentRun:
     agent = get_registered_agent(agent_id, session_factory=session_factory)
@@ -98,6 +106,7 @@ def create_run_for_agent(
         agent_id=execution_target.agent_id,
         version_id=execution_target.version_id,
         resolved_config_json=execution_target.normalized_config_json,
+        input_json=input_json,
         session_factory=session_factory,
     )
 
@@ -153,8 +162,10 @@ def execute_claimed_run(
 
     request: ProviderInvocationRequest | None = None
     provider_type = _peek_provider_type(run.resolved_config_json)
+    tool_results: list[ToolResult] = []
 
     try:
+        tool_results = _execute_tools_for_run(run, session_factory=session_factory)
         request = ProviderInvocationRequest.from_resolved_config(
             run.resolved_config_json,
             input_json=run.input_json,
@@ -180,9 +191,12 @@ def execute_claimed_run(
             session_factory=session_factory,
         )
         provider_result = _invoke_provider_for_run(run, request=request, executor=executor)
+        output_json = provider_result.to_output_json()
+        if tool_results:
+            output_json["tool_results"] = [tool_result.to_json() for tool_result in tool_results]
         completed_run = mark_agent_run_completed(
             run.run_id,
-            output_json=provider_result.to_output_json(),
+            output_json=output_json,
             events=(
                 RunEventCreate(
                     event_type=RUN_EVENT_PROVIDER_EXECUTION_COMPLETED,
@@ -209,6 +223,35 @@ def execute_claimed_run(
             raise AgentRunNotFoundError(run.run_id)
 
         return completed_run
+    except ToolError as exc:
+        failed_run = mark_agent_run_failed(
+            run.run_id,
+            error_message=str(exc),
+            events=(
+                RunEventCreate(
+                    event_type=RUN_EVENT_TOOL_EXECUTION_FAILED,
+                    message="Tool execution failed.",
+                    payload_json={
+                        "tool_name": exc.tool_name,
+                        "error_type": exc.error_type,
+                        "message": str(exc),
+                    },
+                ),
+                RunEventCreate(
+                    event_type=RUN_EVENT_RUN_FAILED,
+                    message="Run failed during execution.",
+                    payload_json={
+                        "tool_name": exc.tool_name,
+                        "error_message": str(exc),
+                    },
+                ),
+            ),
+            session_factory=session_factory,
+        )
+        if failed_run is None:
+            raise
+
+        raise AgentRunExecutionFailedError(failed_run) from exc
     except ProviderError as exc:
         failed_run = mark_agent_run_failed(
             run.run_id,
@@ -344,3 +387,79 @@ def _peek_provider_type(resolved_config_json: dict[str, Any]) -> str:
         if isinstance(provider_type, str) and provider_type.strip():
             return provider_type.strip()
     return "unknown"
+
+
+def _execute_tools_for_run(
+    run: AgentRunDetail,
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+) -> list[ToolResult]:
+    configured_tools = _extract_configured_tools(run.resolved_config_json)
+    if not configured_tools:
+        return []
+
+    validated_tools = validate_tool_names(configured_tools)
+    record_run_event(
+        run.run_id,
+        event_type=RUN_EVENT_TOOLS_VALIDATED,
+        message="Configured tools validated.",
+        payload_json={"tools": list(validated_tools)},
+        session_factory=session_factory,
+    )
+
+    tool_results: list[ToolResult] = []
+    if ECHO_TOOL_NAME in validated_tools:
+        tool_results.append(_execute_echo_tool(run, session_factory=session_factory))
+
+    return tool_results
+
+
+def _execute_echo_tool(
+    run: AgentRunDetail,
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+) -> ToolResult:
+    tool_name = ECHO_TOOL_NAME
+    record_run_event(
+        run.run_id,
+        event_type=RUN_EVENT_TOOL_EXECUTION_STARTED,
+        message="Tool execution started.",
+        payload_json={"tool_name": tool_name},
+        session_factory=session_factory,
+    )
+
+    try:
+        tool_adapter = get_tool_adapter(tool_name)
+        tool_request = ToolInvocationRequest(
+            tool_name=tool_name,
+            input_data=build_echo_input(run.input_json),
+        )
+        tool_result = tool_adapter.invoke(tool_request)
+    except ToolError:
+        raise
+    except Exception as exc:
+        raise ToolExecutionError(
+            tool_name,
+            f"Unexpected tool execution error: {exc}",
+            error_type="unexpected_error",
+        ) from exc
+
+    record_run_event(
+        run.run_id,
+        event_type=RUN_EVENT_TOOL_EXECUTION_COMPLETED,
+        message="Tool execution completed.",
+        payload_json={
+            "tool_name": tool_result.tool_name,
+            "ok": tool_result.ok,
+            "result_preview": preview_echo_result(tool_result),
+        },
+        session_factory=session_factory,
+    )
+    return tool_result
+
+
+def _extract_configured_tools(resolved_config_json: dict[str, Any]) -> list[str]:
+    tools = resolved_config_json.get("tools")
+    if not isinstance(tools, list):
+        return []
+    return [tool_name for tool_name in tools if isinstance(tool_name, str)]

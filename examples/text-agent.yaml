@@ -16,9 +16,7 @@ runtime:
     max_attempts: 3
     backoff_seconds: 5
 
-tools:
-  - web_search
-  - browser
+tools: []
 
 task:
   type: research
