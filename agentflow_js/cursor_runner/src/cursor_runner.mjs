@@ -1,4 +1,4 @@
-import { Agent } from "@cursor/sdk";
+import { Agent, Cursor } from "@cursor/sdk";
 
 function emit(event) {
   process.stdout.write(`${safeJsonStringify(event)}\n`);
@@ -58,25 +58,36 @@ async function main() {
   const apiKey = assertString(request.apiKey, "apiKey");
   const cwd = assertString(request.cwd, "cwd");
   const prompt = assertString(request.prompt, "prompt");
-  const model = typeof request.model === "string" && request.model.trim() ? request.model.trim() : "auto";
+  const requestedModel = typeof request.model === "string" && request.model.trim() ? request.model.trim() : "auto";
 
   emit({ type: "bridge_started", payload: { cwd } });
+
+  const resolvedModel = await resolveModelSelection({ requestedModel, apiKey });
+  emit({
+    type: "bridge_model_resolved",
+    payload: {
+      requestedModel,
+      selectedModelId: resolvedModel.id,
+      selectedModelParamCount: Array.isArray(resolvedModel.params) ? resolvedModel.params.length : 0,
+    },
+  });
 
   const agentOptions = {
     apiKey,
     local: { cwd },
+    model: resolvedModel,
   };
-
-  if (model !== "auto") {
-    agentOptions.model = { id: model };
-  }
 
   const agent = await Agent.create(agentOptions);
 
   let run;
   const metadata = request.metadata && typeof request.metadata === "object" ? request.metadata : undefined;
+  const sendOptions = {
+    model: resolvedModel,
+    ...(metadata ? { metadata } : {}),
+  };
   try {
-    run = metadata ? await agent.send(prompt, { metadata }) : await agent.send(prompt);
+    run = await agent.send(prompt, sendOptions);
   } catch (error) {
     // Backward-compatible fallback for SDKs that don't support options in send().
     run = await agent.send(prompt);
@@ -109,3 +120,40 @@ main()
     process.stderr.write(`${message}\n`);
     process.exitCode = 1;
   });
+
+async function resolveModelSelection({ requestedModel, apiKey }) {
+  if (requestedModel !== "auto") {
+    return { id: requestedModel };
+  }
+
+  const models = await Cursor.models.list({ apiKey });
+  if (!Array.isArray(models) || models.length === 0) {
+    throw new Error(
+      "Cursor model resolution failed for model=auto because no models were returned. " +
+        "Set runner.model explicitly (for example, model: composer-2).",
+    );
+  }
+
+  for (const model of models) {
+    if (!model || typeof model.id !== "string" || !model.id.trim()) {
+      continue;
+    }
+    const variants = Array.isArray(model.variants) ? model.variants : [];
+    const defaultVariant = variants.find((variant) => variant && variant.isDefault);
+    if (defaultVariant) {
+      return {
+        id: model.id,
+        params: Array.isArray(defaultVariant.params) ? defaultVariant.params : [],
+      };
+    }
+  }
+
+  const firstModel = models.find((model) => model && typeof model.id === "string" && model.id.trim());
+  if (!firstModel) {
+    throw new Error(
+      "Cursor model resolution failed for model=auto because no valid model IDs were returned. " +
+        "Set runner.model explicitly (for example, model: composer-2).",
+    );
+  }
+  return { id: firstModel.id };
+}

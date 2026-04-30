@@ -22,7 +22,7 @@ npm install
 
 ```bash
 node src/cursor_runner.mjs <<'JSON'
-{"apiKey":"$CURSOR_API_KEY","cwd":"/path/to/repo","prompt":"hello","model":"auto"}
+{"apiKey":"$CURSOR_API_KEY","cwd":"/path/to/repo","prompt":"hello","model":"composer-2"}
 JSON
 ```
 
@@ -30,4 +30,5 @@ JSON
 
 - Requires Node.js.
 - Requires `CURSOR_API_KEY` passed from AgentFlow (never printed by the bridge).
+- Local Cursor SDK requires an explicit model selection. Passing `model: "auto"` now triggers model resolution through `Cursor.models.list()`.
 - `runtime: cloud` is not implemented in this phase.

@@ -4,7 +4,7 @@ version: 1
 runner:
   type: cursor_sdk
   runtime: local
-  model: auto
+  model: composer-2
   cwd: "."
   api_key_ref: env:CURSOR_API_KEY
   timeout_seconds: 600

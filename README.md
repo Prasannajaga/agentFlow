@@ -131,7 +131,7 @@ Agent configs can define a Cursor SDK runner:
 runner:
   type: cursor_sdk
   runtime: local
-  model: auto
+  model: composer-2
   cwd: "."
   api_key_ref: env:CURSOR_API_KEY
   timeout_seconds: 600
@@ -144,6 +144,8 @@ Requirements:
   - `cd agentflow_js/cursor_runner`
   - `npm install`
 - `CURSOR_API_KEY` set in the environment used by the worker.
+- Prefer an explicit `runner.model` (for example, `composer-2`).
+  If `runner.model: auto` is used, the bridge resolves it via `Cursor.models.list()`.
 - Optional test override: set `AGENTFLOW_CURSOR_BRIDGE_PATH` to a custom bridge script path.
 
 Run flow in this phase:
