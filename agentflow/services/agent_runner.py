@@ -63,6 +63,7 @@ from agentflow.services.runtime_validation import (
     validate_run_configuration,
 )
 from agentflow.services.external_runner import ExternalRunnerError, execute_external_cli_runner
+from agentflow.services.cursor_sdk_runner import CursorSdkRunnerError, execute_cursor_sdk_runner
 
 RunExecutor = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -240,8 +241,11 @@ def execute_claimed_run(
     if run.status != RUN_STATUS_RUNNING:
         raise AgentRunError(f"Run {run.run_id} must be running before execution.")
 
-    if _run_uses_external_runner(run.resolved_config_json):
+    runner_type = _get_runner_type(run.resolved_config_json)
+    if runner_type == "external_cli":
         return _execute_external_runner_run(run, session_factory=session_factory)
+    if runner_type == "cursor_sdk":
+        return _execute_cursor_sdk_runner_run(run, session_factory=session_factory)
 
     request = None
     provider_type = _peek_provider_type(run.resolved_config_json)
@@ -572,6 +576,84 @@ def _execute_external_runner_run(
     raise AgentRunExecutionFailedError(failed_run)
 
 
+def _execute_cursor_sdk_runner_run(
+    run: AgentRunDetail,
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+) -> AgentRunDetail:
+    try:
+        result = execute_cursor_sdk_runner(
+            run.run_id,
+            run.resolved_config_json,
+            input_json=run.input_json,
+            session_factory=session_factory,
+        )
+    except CursorSdkRunnerError as exc:
+        failed_run = mark_agent_run_failed(
+            run.run_id,
+            error_message=str(exc),
+            last_error_type=RUNTIME_ERROR_PROVIDER_EXECUTION,
+            session_factory=session_factory,
+        )
+        if failed_run is None:
+            raise
+        raise AgentRunExecutionFailedError(failed_run) from exc
+    except Exception as exc:
+        failed_run = mark_agent_run_failed(
+            run.run_id,
+            error_message=f"Unexpected cursor_sdk runner error: {exc}",
+            last_error_type=RUNTIME_ERROR_PROVIDER_EXECUTION,
+            session_factory=session_factory,
+        )
+        if failed_run is None:
+            raise
+        raise AgentRunExecutionFailedError(failed_run) from exc
+
+    output_json = {
+        "runner_type": "cursor_sdk",
+        "runtime": result.runtime,
+        "model": result.model,
+        "exit_code": result.exit_code,
+        "base_commit_sha": result.base_commit_sha,
+        "result_commit_sha": result.result_commit_sha,
+        "commit_message": result.commit_message,
+        "changed_files": result.changed_files,
+        "stderr_tail": result.stderr_tail,
+    }
+
+    if result.exit_code == 0:
+        completed_run = mark_agent_run_completed(
+            run.run_id,
+            output_json=output_json,
+            events=(
+                RunEventCreate(
+                    event_type=RUN_EVENT_RUN_COMPLETED,
+                    message="Run completed successfully.",
+                    payload_json={
+                        "status": "completed",
+                        "runner_type": "cursor_sdk",
+                        "result_commit_sha": result.result_commit_sha,
+                    },
+                ),
+            ),
+            session_factory=session_factory,
+        )
+        if completed_run is None:
+            raise AgentRunNotFoundError(run.run_id)
+        return completed_run
+
+    failed_run = mark_agent_run_failed(
+        run.run_id,
+        error_message=f"Cursor SDK runner exited with code {result.exit_code}.",
+        last_error_type=RUNTIME_ERROR_PROVIDER_EXECUTION,
+        output_json=output_json,
+        session_factory=session_factory,
+    )
+    if failed_run is None:
+        raise AgentRunNotFoundError(run.run_id)
+    raise AgentRunExecutionFailedError(failed_run)
+
+
 def _invoke_provider_for_run(
     run: AgentRunDetail,
     *,
@@ -644,13 +726,17 @@ def _peek_provider_type(resolved_config_json: dict[str, Any]) -> str:
     return "unknown"
 
 
-def _run_uses_external_runner(resolved_config_json: dict[str, Any]) -> bool:
+def _get_runner_type(resolved_config_json: dict[str, Any]) -> str | None:
     runner_config = resolved_config_json.get("runner")
     if not isinstance(runner_config, dict):
-        return False
+        return None
 
     runner_type = runner_config.get("type")
-    return isinstance(runner_type, str) and runner_type.strip() == "external_cli"
+    if not isinstance(runner_type, str):
+        return None
+
+    normalized = runner_type.strip()
+    return normalized or None
 
 
 def _execute_tools_for_run(

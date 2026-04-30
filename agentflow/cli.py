@@ -727,11 +727,18 @@ def print_run_detail(
     print(file=file)
     print("code_changes:", file=file)
     if code_change is None:
+        runner_type = "-"
+        if isinstance(run.output_json, dict):
+            raw_runner_type = run.output_json.get("runner_type")
+            if isinstance(raw_runner_type, str) and raw_runner_type.strip():
+                runner_type = raw_runner_type.strip()
+        print_key_value("  runner_type", runner_type, file=file)
         print_key_value("  base_commit_sha", "-", file=file)
         print_key_value("  result_commit_sha", "-", file=file)
         print_key_value("  changed_files_count", 0, file=file)
     else:
         changed_files_json = code_change.changed_files_json
+        print_key_value("  runner_type", code_change.runner_type, file=file)
         print_key_value("  base_commit_sha", code_change.base_commit_sha or "-", file=file)
         print_key_value("  result_commit_sha", code_change.result_commit_sha or "-", file=file)
         print_key_value("  changed_files_count", len(changed_files_json), file=file)
@@ -743,11 +750,14 @@ def summarize_run_output(output_json: dict[str, object] | None) -> str:
 
     parts: list[str] = []
     provider = output_json.get("provider_type") or output_json.get("provider")
+    runner_type = output_json.get("runner_type")
     model = output_json.get("model")
     message = output_json.get("output_text") or output_json.get("message")
 
     if provider:
         parts.append(str(provider))
+    elif runner_type:
+        parts.append(str(runner_type))
     if model:
         parts.append(str(model))
     if message:

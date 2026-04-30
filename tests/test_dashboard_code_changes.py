@@ -17,6 +17,7 @@ def test_run_detail_renders_code_changes(monkeypatch) -> None:
     code_change = RunCodeChangeRecord(
         code_change_id=uuid.uuid4(),
         run_id=run_id,
+        runner_type="cursor_sdk",
         base_commit_sha="abc123",
         result_commit_sha="def456",
         commit_message=f"agentflow run {run_id}",
@@ -30,6 +31,7 @@ def test_run_detail_renders_code_changes(monkeypatch) -> None:
 
     assert response.status_code == 200
     assert "Code Changes" in response.text
+    assert "cursor_sdk" in response.text
     assert "abc123" in response.text
     assert "def456" in response.text
     assert "generated.txt" in response.text

@@ -755,6 +755,7 @@ def _run_code_change_to_view(code_change: RunCodeChangeRecord | None) -> dict[st
     return {
         "code_change_id": str(code_change.code_change_id),
         "run_id": str(code_change.run_id),
+        "runner_type": code_change.runner_type,
         "base_commit_sha": code_change.base_commit_sha or "-",
         "result_commit_sha": code_change.result_commit_sha or "-",
         "commit_message": code_change.commit_message or "-",
@@ -803,7 +804,7 @@ def _summarize_run_output(output_json: dict[str, Any] | None) -> str | None:
         return None
 
     parts: list[str] = []
-    for key in ("provider_type", "provider", "model", "output_text", "message"):
+    for key in ("provider_type", "provider", "runner_type", "model", "output_text", "message"):
         value = output_json.get(key)
         if value:
             parts.append(str(value))

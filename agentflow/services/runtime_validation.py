@@ -51,9 +51,12 @@ class ValidatedProviderConfig:
 @dataclass(frozen=True)
 class ValidatedRunnerConfig:
     runner_type: str
-    command: str
-    args: tuple[str, ...]
+    runtime: str | None
+    model: str | None
     cwd: str
+    api_key_ref: str | None
+    command: str | None
+    args: tuple[str, ...]
     timeout_seconds: int
 
 
@@ -219,38 +222,6 @@ def validate_runner_config(
         runner_config.get("type"),
         "runner.type is required.",
     )
-    if runner_type != "external_cli":
-        raise RuntimeValidationError(
-            f"Unsupported runner type: {runner_type}",
-            classification=RUNTIME_ERROR_CONFIG,
-            error_type="unsupported_runner",
-        )
-
-    command = _require_non_empty_string(
-        runner_config.get("command"),
-        "runner.command is required for external_cli",
-    )
-
-    args_value = runner_config.get("args", [])
-    if args_value is None:
-        args_value = []
-    if not isinstance(args_value, list):
-        raise RuntimeValidationError(
-            "runner.args must be a list of strings.",
-            classification=RUNTIME_ERROR_CONFIG,
-            error_type="invalid_runner_config",
-        )
-
-    args: list[str] = []
-    for index, value in enumerate(args_value):
-        if not isinstance(value, str):
-            raise RuntimeValidationError(
-                f"runner.args[{index}] must be a string.",
-                classification=RUNTIME_ERROR_CONFIG,
-                error_type="invalid_runner_config",
-            )
-        args.append(value)
-
     cwd = _optional_non_empty_string(runner_config.get("cwd")) or "."
     cwd_path = PurePosixPath(cwd)
     if cwd_path.is_absolute():
@@ -266,17 +237,101 @@ def validate_runner_config(
             error_type="invalid_runner_config",
         )
 
-    timeout_value = runner_config.get("timeout_seconds")
-    timeout_seconds = default_timeout_seconds
-    if timeout_value is not None:
-        timeout_seconds = _require_positive_int(timeout_value, "runner.timeout_seconds")
+    if runner_type == "external_cli":
+        command = _require_non_empty_string(
+            runner_config.get("command"),
+            "runner.command is required for external_cli",
+        )
 
-    return ValidatedRunnerConfig(
-        runner_type=runner_type,
-        command=command,
-        args=tuple(args),
-        cwd=cwd,
-        timeout_seconds=timeout_seconds,
+        args_value = runner_config.get("args", [])
+        if args_value is None:
+            args_value = []
+        if not isinstance(args_value, list):
+            raise RuntimeValidationError(
+                "runner.args must be a list of strings.",
+                classification=RUNTIME_ERROR_CONFIG,
+                error_type="invalid_runner_config",
+            )
+
+        args: list[str] = []
+        for index, value in enumerate(args_value):
+            if not isinstance(value, str):
+                raise RuntimeValidationError(
+                    f"runner.args[{index}] must be a string.",
+                    classification=RUNTIME_ERROR_CONFIG,
+                    error_type="invalid_runner_config",
+                )
+            args.append(value)
+
+        timeout_value = runner_config.get("timeout_seconds")
+        timeout_seconds = default_timeout_seconds
+        if timeout_value is not None:
+            timeout_seconds = _require_positive_int(timeout_value, "runner.timeout_seconds")
+
+        return ValidatedRunnerConfig(
+            runner_type=runner_type,
+            runtime=None,
+            model=None,
+            cwd=cwd,
+            api_key_ref=None,
+            command=command,
+            args=tuple(args),
+            timeout_seconds=timeout_seconds,
+        )
+
+    if runner_type == "cursor_sdk":
+        runtime = _optional_non_empty_string(runner_config.get("runtime")) or "local"
+        if runtime == "cloud":
+            raise RuntimeValidationError(
+                "runner.runtime=cloud is not implemented yet. Use runner.runtime=local.",
+                classification=RUNTIME_ERROR_CONFIG,
+                error_type="unsupported_runner_runtime",
+            )
+        if runtime != "local":
+            raise RuntimeValidationError(
+                f"Unsupported runner.runtime value: {runtime}",
+                classification=RUNTIME_ERROR_CONFIG,
+                error_type="invalid_runner_config",
+            )
+
+        model = _optional_non_empty_string(runner_config.get("model")) or "auto"
+
+        api_key_ref = _optional_non_empty_string(runner_config.get("api_key_ref"))
+        if api_key_ref is None:
+            raise RuntimeValidationError(
+                "runner.api_key_ref is required for cursor_sdk",
+                classification=RUNTIME_ERROR_CONFIG,
+                error_type="invalid_runner_config",
+            )
+        try:
+            parse_secret_ref(api_key_ref)
+        except SecretResolutionError as exc:
+            raise RuntimeValidationError(
+                str(exc),
+                classification=RUNTIME_ERROR_SECRET,
+                error_type=exc.error_type,
+            ) from exc
+
+        timeout_value = runner_config.get("timeout_seconds")
+        timeout_seconds = 600
+        if timeout_value is not None:
+            timeout_seconds = _require_positive_int(timeout_value, "runner.timeout_seconds")
+
+        return ValidatedRunnerConfig(
+            runner_type=runner_type,
+            runtime=runtime,
+            model=model,
+            cwd=cwd,
+            api_key_ref=api_key_ref,
+            command=None,
+            args=(),
+            timeout_seconds=timeout_seconds,
+        )
+
+    raise RuntimeValidationError(
+        f"Unsupported runner type: {runner_type}",
+        classification=RUNTIME_ERROR_CONFIG,
+        error_type="unsupported_runner",
     )
 
 

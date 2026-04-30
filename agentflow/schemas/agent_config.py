@@ -42,21 +42,15 @@ class ProviderConfig(StrictModel):
         raise ValueError(f"Unsupported provider type: {self.type}")
 
 
-class RunnerConfig(StrictModel):
-    type: NonEmptyString
+class ExternalCliRunnerConfig(StrictModel):
+    type: Literal["external_cli"]
     command: NonEmptyString
     args: list[NonEmptyString] = Field(default_factory=list)
     cwd: NonEmptyString = "."
     timeout_seconds: PositiveInt | None = None
 
     @model_validator(mode="after")
-    def validate_runner_requirements(self) -> "RunnerConfig":
-        if self.type != "external_cli":
-            raise ValueError(f"Unsupported runner type: {self.type}")
-
-        if not self.command.strip():
-            raise ValueError("runner.command must be a non-empty string.")
-
+    def validate_runner_requirements(self) -> "ExternalCliRunnerConfig":
         normalized_cwd = self.cwd.strip()
         cwd_path = PurePosixPath(normalized_cwd)
         if cwd_path.is_absolute():
@@ -65,6 +59,40 @@ class RunnerConfig(StrictModel):
             raise ValueError("runner.cwd cannot contain parent path traversal ('..').")
 
         return self
+
+
+class CursorSdkRunnerConfig(StrictModel):
+    type: Literal["cursor_sdk"]
+    runtime: Literal["local", "cloud"] = "local"
+    model: NonEmptyString = "auto"
+    cwd: NonEmptyString = "."
+    api_key_ref: NonEmptyString
+    timeout_seconds: PositiveInt = 600
+
+    @model_validator(mode="after")
+    def validate_runner_requirements(self) -> "CursorSdkRunnerConfig":
+        if self.runtime == "cloud":
+            raise ValueError("runner.runtime=cloud is not implemented yet. Use runner.runtime=local.")
+
+        normalized_cwd = self.cwd.strip()
+        cwd_path = PurePosixPath(normalized_cwd)
+        if cwd_path.is_absolute():
+            raise ValueError("runner.cwd must be a relative path.")
+        if ".." in cwd_path.parts:
+            raise ValueError("runner.cwd cannot contain parent path traversal ('..').")
+
+        try:
+            parse_secret_ref(self.api_key_ref)
+        except SecretResolutionError as exc:
+            raise ValueError(str(exc)) from exc
+
+        return self
+
+
+RunnerConfig = Annotated[
+    ExternalCliRunnerConfig | CursorSdkRunnerConfig,
+    Field(discriminator="type"),
+]
 
 
 class RetryConfig(StrictModel):

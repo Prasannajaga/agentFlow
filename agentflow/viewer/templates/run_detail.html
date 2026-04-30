@@ -113,9 +113,10 @@
 </section>
 
 <section class="panel">
-  <h2>Code Changes</h2>
+  <h2>Cursor SDK / Code Changes</h2>
   {% if code_change %}
   <dl class="meta">
+    <dt>Runner Type</dt><dd><code>{{ code_change.runner_type }}</code></dd>
     <dt>Base Commit</dt><dd><code>{{ code_change.base_commit_sha }}</code></dd>
     <dt>Result Commit</dt><dd><code>{{ code_change.result_commit_sha }}</code></dd>
     <dt>Commit Message</dt><dd>{{ code_change.commit_message }}</dd>
@@ -128,6 +129,7 @@
         <tr>
           <th>Status</th>
           <th>Path</th>
+          <th>Old Path</th>
         </tr>
       </thead>
       <tbody>
@@ -135,6 +137,7 @@
         <tr>
           <td>{{ file.status }}</td>
           <td><code>{{ file.path }}</code></td>
+          <td>{% if file.old_path %}<code>{{ file.old_path }}</code>{% else %}-{% endif %}</td>
         </tr>
         {% endfor %}
       </tbody>

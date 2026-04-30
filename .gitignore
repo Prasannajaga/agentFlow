@@ -4,3 +4,11 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+.env
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+node_modules/
+agentflow_js/cursor_runner/node_modules/
+*.log
+TEST_CURSOR_SMOKE.md

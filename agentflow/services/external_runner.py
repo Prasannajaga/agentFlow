@@ -93,7 +93,10 @@ def get_changed_files_for_commit(cwd: Path, commit_sha: str) -> list[dict[str, s
         status_token = parts[0]
         path = parts[-1]
         status = _map_git_status(status_token)
-        changed_files.append({"path": path, "status": status})
+        entry: dict[str, str] = {"path": path, "status": status}
+        if status == "renamed" and len(parts) >= 3:
+            entry["old_path"] = parts[1]
+        changed_files.append(entry)
 
     return changed_files
 
@@ -123,6 +126,8 @@ def execute_external_cli_runner(
             )
 
         base_commit_sha = get_head_commit(resolved_cwd)
+        if runner.command is None:
+            raise ExternalRunnerError("runner.command is required for external_cli.")
         command = [runner.command, *runner.args]
 
         record_run_event(
@@ -156,6 +161,7 @@ def execute_external_cli_runner(
             result_commit_sha=result_commit_sha,
             commit_message=commit_message,
             changed_files_json=changed_files,
+            runner_type="external_cli",
             session_factory=session_factory,
         )
 

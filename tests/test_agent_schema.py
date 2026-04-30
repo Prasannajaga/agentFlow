@@ -122,6 +122,94 @@ def test_external_cli_runner_rejects_non_string_args() -> None:
         load_agent_document_from_text(raw_yaml)
 
 
+def test_cursor_sdk_runner_config_is_accepted() -> None:
+    raw_yaml = make_agent_yaml(
+        extra={
+            "provider": None,
+            "runner": {
+                "type": "cursor_sdk",
+                "runtime": "local",
+                "model": "auto",
+                "cwd": ".",
+                "api_key_ref": "env:CURSOR_API_KEY",
+                "timeout_seconds": 600,
+            },
+        }
+    )
+
+    document = load_agent_document_from_text(raw_yaml)
+    assert document.config.runner is not None
+    assert document.config.runner.type == "cursor_sdk"
+    assert document.config.runner.runtime == "local"
+
+
+def test_cursor_sdk_runner_rejects_absolute_cwd() -> None:
+    raw_yaml = make_agent_yaml(
+        extra={
+            "provider": None,
+            "runner": {
+                "type": "cursor_sdk",
+                "runtime": "local",
+                "cwd": "/tmp",
+                "api_key_ref": "env:CURSOR_API_KEY",
+            },
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        load_agent_document_from_text(raw_yaml)
+
+
+def test_cursor_sdk_runner_rejects_parent_traversal_cwd() -> None:
+    raw_yaml = make_agent_yaml(
+        extra={
+            "provider": None,
+            "runner": {
+                "type": "cursor_sdk",
+                "runtime": "local",
+                "cwd": "../outside",
+                "api_key_ref": "env:CURSOR_API_KEY",
+            },
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        load_agent_document_from_text(raw_yaml)
+
+
+def test_cursor_sdk_runner_requires_api_key_ref() -> None:
+    raw_yaml = make_agent_yaml(
+        extra={
+            "provider": None,
+            "runner": {
+                "type": "cursor_sdk",
+                "runtime": "local",
+                "cwd": ".",
+            },
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        load_agent_document_from_text(raw_yaml)
+
+
+def test_cursor_sdk_runner_rejects_cloud_runtime_for_now() -> None:
+    raw_yaml = make_agent_yaml(
+        extra={
+            "provider": None,
+            "runner": {
+                "type": "cursor_sdk",
+                "runtime": "cloud",
+                "cwd": ".",
+                "api_key_ref": "env:CURSOR_API_KEY",
+            },
+        }
+    )
+
+    with pytest.raises(ValidationError):
+        load_agent_document_from_text(raw_yaml)
+
+
 def test_invalid_secret_ref_format_fails_validation() -> None:
     raw_yaml = make_agent_yaml(
         extra={

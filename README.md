@@ -123,11 +123,50 @@ Behavior in this phase:
 - If git changes exist, AgentFlow commits them with message `agentflow run <run_id>`.
 - Run detail dashboard shows a simple code-changes summary.
 
-Not included yet:
+## Cursor SDK local runner
 
-- Resume/continue sessions
-- Diff/patch viewer
-- Streaming runner events
+Agent configs can define a Cursor SDK runner:
+
+```yaml
+runner:
+  type: cursor_sdk
+  runtime: local
+  model: auto
+  cwd: "."
+  api_key_ref: env:CURSOR_API_KEY
+  timeout_seconds: 600
+```
+
+Requirements:
+
+- Node.js installed locally.
+- Bridge dependencies installed:
+  - `cd agentflow_js/cursor_runner`
+  - `npm install`
+- `CURSOR_API_KEY` set in the environment used by the worker.
+- Optional test override: set `AGENTFLOW_CURSOR_BRIDGE_PATH` to a custom bridge script path.
+
+Run flow in this phase:
+
+- AgentFlow executes Cursor SDK locally inside the configured git repo `cwd`.
+- AgentFlow stores streamed bridge events in `run_events`.
+- AgentFlow commits changed files after runner exit when changes exist.
+- AgentFlow stores base/result commit SHA, commit message, and changed files.
+- Dashboard run detail shows code changes and changed files.
+
+Example:
+
+```bash
+.venv/bin/agentflow register examples/cursor-sdk-local-agent.yaml
+.venv/bin/agentflow run <agent_id> --input-json '{"task":"update README headline"}'
+```
+
+Not implemented yet for Cursor SDK:
+
+- Cloud runtime (`runner.runtime: cloud`)
+- Resume/continue
+- PR creation
+- Diff viewer
 
 ## List runs
 

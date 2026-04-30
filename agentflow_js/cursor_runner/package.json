@@ -1,0 +1,13 @@
+{
+  "name": "agentflow-cursor-runner-bridge",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
+  "description": "Local Cursor SDK bridge for AgentFlow",
+  "dependencies": {
+    "@cursor/sdk": "*"
+  },
+  "scripts": {
+    "start": "node src/cursor_runner.mjs"
+  }
+}

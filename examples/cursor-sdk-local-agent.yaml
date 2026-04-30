@@ -1,0 +1,23 @@
+name: cursor-sdk-local-demo
+version: 1
+
+runner:
+  type: cursor_sdk
+  runtime: local
+  model: auto
+  cwd: "."
+  api_key_ref: env:CURSOR_API_KEY
+  timeout_seconds: 600
+
+provider:
+  type: fake
+  model: stub-model
+
+system_prompt: |
+  You are a coding agent running through Cursor SDK.
+  Make only the requested small change, then summarize what changed in 3 bullets.
+
+task:
+  type: coding
+  input_schema:
+    task: string

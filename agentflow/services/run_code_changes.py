@@ -16,6 +16,7 @@ from agentflow.db.session import create_session_factory
 class RunCodeChangeRecord:
     code_change_id: uuid.UUID
     run_id: uuid.UUID
+    runner_type: str
     base_commit_sha: str | None
     result_commit_sha: str | None
     commit_message: str | None
@@ -26,6 +27,7 @@ class RunCodeChangeRecord:
 def create_run_code_change(
     run_id: uuid.UUID,
     *,
+    runner_type: str = "cursor_sdk",
     base_commit_sha: str | None,
     result_commit_sha: str | None,
     commit_message: str | None,
@@ -42,6 +44,7 @@ def create_run_code_change(
 
             row = RunCodeChange(
                 run_id=run_id,
+                runner_type=runner_type,
                 base_commit_sha=base_commit_sha,
                 result_commit_sha=result_commit_sha,
                 commit_message=commit_message,
@@ -78,6 +81,7 @@ def _build_code_change_record(row: RunCodeChange) -> RunCodeChangeRecord:
     return RunCodeChangeRecord(
         code_change_id=row.id,
         run_id=row.run_id,
+        runner_type=row.runner_type,
         base_commit_sha=row.base_commit_sha,
         result_commit_sha=row.result_commit_sha,
         commit_message=row.commit_message,

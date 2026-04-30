@@ -353,6 +353,7 @@ class RunCodeChange(Base):
     __table_args__ = (
         Index("ix_run_code_changes_run_id", "run_id"),
         Index("ix_run_code_changes_result_commit_sha", "result_commit_sha"),
+        Index("ix_run_code_changes_runner_type", "runner_type"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
@@ -361,6 +362,7 @@ class RunCodeChange(Base):
         ForeignKey("agent_runs.id", ondelete="CASCADE"),
         nullable=False,
     )
+    runner_type: Mapped[str] = mapped_column(String(64), nullable=False, default="cursor_sdk")
     base_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
     result_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
     commit_message: Mapped[str | None] = mapped_column(Text, nullable=True)
