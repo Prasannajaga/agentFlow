@@ -100,6 +100,35 @@ The command loads the latest agent version, creates an `agent_runs` row with `pe
 
 The worker polls Postgres for pending runs, claims one safely, and moves it through `running` and `completed` or `failed`.
 
+## External CLI runner
+
+Agent configs can define an external command runner:
+
+```yaml
+runner:
+  type: external_cli
+  command: python
+  args:
+    - "-c"
+    - "from pathlib import Path; Path('agentflow_demo_output.txt').write_text('hello from external runner\\n', encoding='utf-8')"
+  cwd: "."
+  timeout_seconds: 30
+```
+
+Behavior in this phase:
+
+- `runner.type: external_cli` is supported.
+- `command`/`args` run in `cwd` (relative path only).
+- After execution, AgentFlow records base/result commit SHA and changed files.
+- If git changes exist, AgentFlow commits them with message `agentflow run <run_id>`.
+- Run detail dashboard shows a simple code-changes summary.
+
+Not included yet:
+
+- Resume/continue sessions
+- Diff/patch viewer
+- Streaming runner events
+
 ## List runs
 
 ```bash

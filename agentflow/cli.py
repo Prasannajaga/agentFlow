@@ -118,6 +118,7 @@ from agentflow.services.preset_service import (
 )
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.run_events import RunEventRecord, RunEventSummary, get_run_event_summary, list_run_events
+from agentflow.services.run_code_changes import RunCodeChangeRecord, get_latest_run_code_change
 from agentflow.services.worker_jobs import start_worker_loop
 from agentflow.services.worker_ops import (
     StaleRunCandidate,
@@ -704,6 +705,7 @@ def print_run_detail(
     run: AgentRunDetail,
     *,
     event_summary: RunEventSummary | None = None,
+    code_change: RunCodeChangeRecord | None = None,
     file: IO[str] = sys.stdout,
 ) -> None:
     print_run_summary(run, file=file)
@@ -721,6 +723,18 @@ def print_run_detail(
         print(file=file)
         print("output_json:", file=file)
         print(json.dumps(run.output_json, indent=2), file=file)
+
+    print(file=file)
+    print("code_changes:", file=file)
+    if code_change is None:
+        print_key_value("  base_commit_sha", "-", file=file)
+        print_key_value("  result_commit_sha", "-", file=file)
+        print_key_value("  changed_files_count", 0, file=file)
+    else:
+        changed_files_json = code_change.changed_files_json
+        print_key_value("  base_commit_sha", code_change.base_commit_sha or "-", file=file)
+        print_key_value("  result_commit_sha", code_change.result_commit_sha or "-", file=file)
+        print_key_value("  changed_files_count", len(changed_files_json), file=file)
 
 
 def summarize_run_output(output_json: dict[str, object] | None) -> str:
@@ -1190,7 +1204,10 @@ def run_validate(path: Path) -> int:
         return 1
 
     print(f"Validation succeeded for {path}")
-    print(f"provider_type: {validated.provider.provider_type}")
+    provider_type = validated.provider.provider_type if validated.provider is not None else "-"
+    runner_type = validated.runner.runner_type if validated.runner is not None else "-"
+    print(f"provider_type: {provider_type}")
+    print(f"runner_type: {runner_type}")
     print(f"tools: {', '.join(validated.tools) if validated.tools else '-'}")
     print(f"timeout_seconds: {validated.timeouts.timeout_seconds}")
     print(f"provider_timeout_seconds: {validated.timeouts.provider_timeout_seconds}")
@@ -1375,6 +1392,7 @@ def run_show_run(run_id_text: str) -> int:
         run_id = parse_run_id(run_id_text)
         run = get_agent_run(run_id)
         event_summary = get_run_event_summary(run_id)
+        code_change = get_latest_run_code_change(run_id)
     except Exception as exc:
         return handle_cli_query_error(exc, action="Show run")
 
@@ -1382,7 +1400,7 @@ def run_show_run(run_id_text: str) -> int:
         print(f"Run not found: {run_id}", file=sys.stderr)
         return 1
 
-    print_run_detail(run, event_summary=event_summary)
+    print_run_detail(run, event_summary=event_summary, code_change=code_change)
     return 0
 
 

@@ -73,6 +73,7 @@ from agentflow.services.run_compare import (
     RunCompareNotFoundError,
     compare_runs,
 )
+from agentflow.services.run_code_changes import RunCodeChangeRecord, get_latest_run_code_change
 from agentflow.services.run_events import RunEventRecord, list_run_events
 from agentflow.services.run_queries import AgentRunDetail, AgentRunSummary, get_agent_run, list_agent_runs
 from agentflow.services.stats_queries import DashboardStats, get_dashboard_stats
@@ -425,6 +426,7 @@ def run_detail(request: Request, run_id: str) -> HTMLResponse:
         return _not_found(request, "Run not found")
 
     events = list_run_events(parsed_run_id)
+    code_change = get_latest_run_code_change(parsed_run_id)
     retry_eligibility = get_manual_retry_eligibility(run)
     return templates.TemplateResponse(
         request,
@@ -436,6 +438,7 @@ def run_detail(request: Request, run_id: str) -> HTMLResponse:
             "labels": [record.label for record in list_run_labels(parsed_run_id)],
             "evaluations": [_evaluation_to_view(evaluation) for evaluation in list_run_evaluations(parsed_run_id)],
             "artifacts": [_artifact_to_view(artifact) for artifact in (list_run_artifacts(parsed_run_id) or [])],
+            "code_change": _run_code_change_to_view(code_change),
             "feedback": _feedback_from_request(request),
             "can_rerun": bool(run.resolved_config_json),
             "retry_eligible": retry_eligibility.eligible,
@@ -742,6 +745,22 @@ def _artifact_to_view(artifact: ArtifactRecord) -> dict[str, Any]:
         "size_bytes": artifact.size_bytes if artifact.size_bytes is not None else "-",
         "description": artifact.description,
         "created_at": _format_datetime(artifact.created_at),
+    }
+
+
+def _run_code_change_to_view(code_change: RunCodeChangeRecord | None) -> dict[str, Any] | None:
+    if code_change is None:
+        return None
+
+    return {
+        "code_change_id": str(code_change.code_change_id),
+        "run_id": str(code_change.run_id),
+        "base_commit_sha": code_change.base_commit_sha or "-",
+        "result_commit_sha": code_change.result_commit_sha or "-",
+        "commit_message": code_change.commit_message or "-",
+        "changed_files": [dict(item) for item in code_change.changed_files_json],
+        "changed_files_count": len(code_change.changed_files_json),
+        "created_at": _format_datetime(code_change.created_at),
     }
 
 

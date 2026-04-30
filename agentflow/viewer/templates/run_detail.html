@@ -113,6 +113,42 @@
 </section>
 
 <section class="panel">
+  <h2>Code Changes</h2>
+  {% if code_change %}
+  <dl class="meta">
+    <dt>Base Commit</dt><dd><code>{{ code_change.base_commit_sha }}</code></dd>
+    <dt>Result Commit</dt><dd><code>{{ code_change.result_commit_sha }}</code></dd>
+    <dt>Commit Message</dt><dd>{{ code_change.commit_message }}</dd>
+  </dl>
+
+  {% if code_change.changed_files %}
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Status</th>
+          <th>Path</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for file in code_change.changed_files %}
+        <tr>
+          <td>{{ file.status }}</td>
+          <td><code>{{ file.path }}</code></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="empty">No changed files recorded for this run.</p>
+  {% endif %}
+  {% else %}
+  <p class="empty">No code changes recorded for this run.</p>
+  {% endif %}
+</section>
+
+<section class="panel">
   <h2>Artifacts</h2>
   {% if artifacts %}
   <div class="table-wrap">

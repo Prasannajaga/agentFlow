@@ -1,0 +1,23 @@
+name: external-cli-demo
+version: 1
+
+runner:
+  type: external_cli
+  command: python
+  args:
+    - "-c"
+    - "from pathlib import Path; Path('agentflow_demo_output.txt').write_text('hello from external runner\\n', encoding='utf-8')"
+  cwd: "."
+  timeout_seconds: 30
+
+provider:
+  type: fake
+  model: stub-model
+
+system_prompt: "External CLI demo agent"
+
+runtime:
+  timeout_seconds: 30
+  retry:
+    max_attempts: 1
+    backoff_seconds: 0

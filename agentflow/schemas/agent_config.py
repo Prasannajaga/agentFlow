@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import PurePosixPath
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
@@ -41,6 +42,31 @@ class ProviderConfig(StrictModel):
         raise ValueError(f"Unsupported provider type: {self.type}")
 
 
+class RunnerConfig(StrictModel):
+    type: NonEmptyString
+    command: NonEmptyString
+    args: list[NonEmptyString] = Field(default_factory=list)
+    cwd: NonEmptyString = "."
+    timeout_seconds: PositiveInt | None = None
+
+    @model_validator(mode="after")
+    def validate_runner_requirements(self) -> "RunnerConfig":
+        if self.type != "external_cli":
+            raise ValueError(f"Unsupported runner type: {self.type}")
+
+        if not self.command.strip():
+            raise ValueError("runner.command must be a non-empty string.")
+
+        normalized_cwd = self.cwd.strip()
+        cwd_path = PurePosixPath(normalized_cwd)
+        if cwd_path.is_absolute():
+            raise ValueError("runner.cwd must be a relative path.")
+        if ".." in cwd_path.parts:
+            raise ValueError("runner.cwd cannot contain parent path traversal ('..').")
+
+        return self
+
+
 class RetryConfig(StrictModel):
     max_attempts: PositiveInt = 1
     backoff_seconds: NonNegativeInt = 0
@@ -73,10 +99,17 @@ class AgentConfig(StrictModel):
     name: NonEmptyString
     version: PositiveInt
     description: NonEmptyString | None = None
-    provider: ProviderConfig
+    provider: ProviderConfig | None = None
+    runner: RunnerConfig | None = None
     system_prompt: NonEmptyString
     runtime: RuntimeConfig | None = None
     tools: list[NonEmptyString] = Field(default_factory=list)
     task: TaskConfig | None = None
     telemetry: TelemetryConfig = Field(default_factory=TelemetryConfig)
     outputs: OutputsConfig = Field(default_factory=OutputsConfig)
+
+    @model_validator(mode="after")
+    def validate_execution_mode(self) -> "AgentConfig":
+        if self.provider is None and self.runner is None:
+            raise ValueError("Either provider or runner must be configured.")
+        return self

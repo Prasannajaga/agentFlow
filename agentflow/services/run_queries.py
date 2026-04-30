@@ -332,6 +332,7 @@ def mark_agent_run_failed(
     *,
     error_message: str,
     last_error_type: str | None = None,
+    output_json: dict[str, Any] | None | object = _UNSET,
     events: Sequence[RunEventCreate] = (),
     session_factory: sessionmaker[Session] | None = None,
 ) -> AgentRunDetail | None:
@@ -346,6 +347,8 @@ def mark_agent_run_failed(
 
             run.error_message = error_message
             run.last_error_type = last_error_type
+            if output_json is not _UNSET:
+                run.output_json = output_json
             run.updated_at = now
 
             attempt_payload = {

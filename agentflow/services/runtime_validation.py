@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import Any
 
 from agentflow.providers.base import (
@@ -48,6 +49,15 @@ class ValidatedProviderConfig:
 
 
 @dataclass(frozen=True)
+class ValidatedRunnerConfig:
+    runner_type: str
+    command: str
+    args: tuple[str, ...]
+    cwd: str
+    timeout_seconds: int
+
+
+@dataclass(frozen=True)
 class ResolvedRuntimeTimeouts:
     timeout_seconds: int
     provider_timeout_seconds: int
@@ -55,7 +65,8 @@ class ResolvedRuntimeTimeouts:
 
 @dataclass(frozen=True)
 class ValidatedRunConfiguration:
-    provider: ValidatedProviderConfig
+    provider: ValidatedProviderConfig | None
+    runner: ValidatedRunnerConfig | None
     tools: tuple[str, ...]
     timeouts: ResolvedRuntimeTimeouts
 
@@ -188,11 +199,106 @@ def resolve_provider_timeout(
     )
 
 
+def validate_runner_config(
+    resolved_config_json: dict[str, Any],
+    *,
+    default_timeout_seconds: int,
+) -> ValidatedRunnerConfig | None:
+    runner_config = resolved_config_json.get("runner")
+    if runner_config is None:
+        return None
+
+    if not isinstance(runner_config, dict):
+        raise RuntimeValidationError(
+            "runner must be an object when provided.",
+            classification=RUNTIME_ERROR_CONFIG,
+            error_type="invalid_runner_config",
+        )
+
+    runner_type = _require_non_empty_string(
+        runner_config.get("type"),
+        "runner.type is required.",
+    )
+    if runner_type != "external_cli":
+        raise RuntimeValidationError(
+            f"Unsupported runner type: {runner_type}",
+            classification=RUNTIME_ERROR_CONFIG,
+            error_type="unsupported_runner",
+        )
+
+    command = _require_non_empty_string(
+        runner_config.get("command"),
+        "runner.command is required for external_cli",
+    )
+
+    args_value = runner_config.get("args", [])
+    if args_value is None:
+        args_value = []
+    if not isinstance(args_value, list):
+        raise RuntimeValidationError(
+            "runner.args must be a list of strings.",
+            classification=RUNTIME_ERROR_CONFIG,
+            error_type="invalid_runner_config",
+        )
+
+    args: list[str] = []
+    for index, value in enumerate(args_value):
+        if not isinstance(value, str):
+            raise RuntimeValidationError(
+                f"runner.args[{index}] must be a string.",
+                classification=RUNTIME_ERROR_CONFIG,
+                error_type="invalid_runner_config",
+            )
+        args.append(value)
+
+    cwd = _optional_non_empty_string(runner_config.get("cwd")) or "."
+    cwd_path = PurePosixPath(cwd)
+    if cwd_path.is_absolute():
+        raise RuntimeValidationError(
+            "runner.cwd must be a relative path.",
+            classification=RUNTIME_ERROR_CONFIG,
+            error_type="invalid_runner_config",
+        )
+    if ".." in cwd_path.parts:
+        raise RuntimeValidationError(
+            "runner.cwd cannot contain parent path traversal ('..').",
+            classification=RUNTIME_ERROR_CONFIG,
+            error_type="invalid_runner_config",
+        )
+
+    timeout_value = runner_config.get("timeout_seconds")
+    timeout_seconds = default_timeout_seconds
+    if timeout_value is not None:
+        timeout_seconds = _require_positive_int(timeout_value, "runner.timeout_seconds")
+
+    return ValidatedRunnerConfig(
+        runner_type=runner_type,
+        command=command,
+        args=tuple(args),
+        cwd=cwd,
+        timeout_seconds=timeout_seconds,
+    )
+
+
 def validate_run_configuration(resolved_config_json: dict[str, Any]) -> ValidatedRunConfiguration:
-    provider = validate_provider_config(resolved_config_json)
-    tools = validate_tool_config(resolved_config_json)
     timeouts = resolve_provider_timeout(resolved_config_json)
-    return ValidatedRunConfiguration(provider=provider, tools=tools, timeouts=timeouts)
+    provider = (
+        validate_provider_config(resolved_config_json)
+        if resolved_config_json.get("provider") is not None
+        else None
+    )
+    runner = validate_runner_config(
+        resolved_config_json,
+        default_timeout_seconds=timeouts.timeout_seconds,
+    )
+    if provider is None and runner is None:
+        raise RuntimeValidationError(
+            "Either provider or runner must be configured.",
+            classification=RUNTIME_ERROR_CONFIG,
+            error_type="invalid_run_config",
+        )
+    tools = validate_tool_config(resolved_config_json)
+    return ValidatedRunConfiguration(provider=provider, runner=runner, tools=tools, timeouts=timeouts)
 
 
 def build_provider_request(
@@ -201,6 +307,12 @@ def build_provider_request(
     input_json: dict[str, Any] | None = None,
 ) -> ProviderInvocationRequest:
     validated = validate_run_configuration(resolved_config_json)
+    if validated.provider is None:
+        raise RuntimeValidationError(
+            "provider configuration is required to build a provider request.",
+            classification=RUNTIME_ERROR_CONFIG,
+            error_type="invalid_provider_config",
+        )
     return ProviderInvocationRequest(
         provider_type=validated.provider.provider_type,
         model=validated.provider.model,

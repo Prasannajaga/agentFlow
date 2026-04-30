@@ -54,6 +54,7 @@ from agentflow.tools.echo import ECHO_TOOL_NAME, build_echo_input, preview_echo_
 from agentflow.tools.registry import get_tool_adapter
 from agentflow.services.runtime_validation import (
     RUNTIME_ERROR_PROVIDER_SETUP,
+    RUNTIME_ERROR_PROVIDER_EXECUTION,
     RUNTIME_ERROR_SECRET,
     RuntimeValidationError,
     build_provider_request,
@@ -61,6 +62,7 @@ from agentflow.services.runtime_validation import (
     validate_provider_setup,
     validate_run_configuration,
 )
+from agentflow.services.external_runner import ExternalRunnerError, execute_external_cli_runner
 
 RunExecutor = Callable[[dict[str, Any]], dict[str, Any]]
 
@@ -237,6 +239,9 @@ def execute_claimed_run(
 
     if run.status != RUN_STATUS_RUNNING:
         raise AgentRunError(f"Run {run.run_id} must be running before execution.")
+
+    if _run_uses_external_runner(run.resolved_config_json):
+        return _execute_external_runner_run(run, session_factory=session_factory)
 
     request = None
     provider_type = _peek_provider_type(run.resolved_config_json)
@@ -492,6 +497,81 @@ def execute_claimed_run(
         raise AgentRunExecutionFailedError(failed_run) from exc
 
 
+def _execute_external_runner_run(
+    run: AgentRunDetail,
+    *,
+    session_factory: sessionmaker[Session] | None = None,
+) -> AgentRunDetail:
+    try:
+        result = execute_external_cli_runner(
+            run.run_id,
+            run.resolved_config_json,
+            session_factory=session_factory,
+        )
+    except ExternalRunnerError as exc:
+        failed_run = mark_agent_run_failed(
+            run.run_id,
+            error_message=str(exc),
+            last_error_type=RUNTIME_ERROR_PROVIDER_EXECUTION,
+            session_factory=session_factory,
+        )
+        if failed_run is None:
+            raise
+        raise AgentRunExecutionFailedError(failed_run) from exc
+    except Exception as exc:
+        failed_run = mark_agent_run_failed(
+            run.run_id,
+            error_message=f"Unexpected external runner error: {exc}",
+            last_error_type=RUNTIME_ERROR_PROVIDER_EXECUTION,
+            session_factory=session_factory,
+        )
+        if failed_run is None:
+            raise
+        raise AgentRunExecutionFailedError(failed_run) from exc
+
+    output_json = {
+        "runner_type": "external_cli",
+        "exit_code": result.exit_code,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "base_commit_sha": result.base_commit_sha,
+        "result_commit_sha": result.result_commit_sha,
+        "changed_files": result.changed_files,
+    }
+
+    if result.exit_code == 0:
+        completed_run = mark_agent_run_completed(
+            run.run_id,
+            output_json=output_json,
+            events=(
+                RunEventCreate(
+                    event_type=RUN_EVENT_RUN_COMPLETED,
+                    message="Run completed successfully.",
+                    payload_json={
+                        "status": "completed",
+                        "runner_type": "external_cli",
+                        "result_commit_sha": result.result_commit_sha,
+                    },
+                ),
+            ),
+            session_factory=session_factory,
+        )
+        if completed_run is None:
+            raise AgentRunNotFoundError(run.run_id)
+        return completed_run
+
+    failed_run = mark_agent_run_failed(
+        run.run_id,
+        error_message=f"External CLI runner exited with code {result.exit_code}.",
+        last_error_type=RUNTIME_ERROR_PROVIDER_EXECUTION,
+        output_json=output_json,
+        session_factory=session_factory,
+    )
+    if failed_run is None:
+        raise AgentRunNotFoundError(run.run_id)
+    raise AgentRunExecutionFailedError(failed_run)
+
+
 def _invoke_provider_for_run(
     run: AgentRunDetail,
     *,
@@ -562,6 +642,15 @@ def _peek_provider_type(resolved_config_json: dict[str, Any]) -> str:
         if isinstance(provider_type, str) and provider_type.strip():
             return provider_type.strip()
     return "unknown"
+
+
+def _run_uses_external_runner(resolved_config_json: dict[str, Any]) -> bool:
+    runner_config = resolved_config_json.get("runner")
+    if not isinstance(runner_config, dict):
+        return False
+
+    runner_type = runner_config.get("type")
+    return isinstance(runner_type, str) and runner_type.strip() == "external_cli"
 
 
 def _execute_tools_for_run(

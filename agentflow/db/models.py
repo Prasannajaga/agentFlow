@@ -134,6 +134,10 @@ class AgentRun(Base):
         back_populates="run",
         cascade="all, delete-orphan",
     )
+    code_changes: Mapped[list["RunCodeChange"]] = relationship(
+        back_populates="run",
+        cascade="all, delete-orphan",
+    )
 
 
 class WorkerHeartbeat(Base):
@@ -342,3 +346,25 @@ class RunArtifact(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
 
     run: Mapped[AgentRun] = relationship(back_populates="artifacts")
+
+
+class RunCodeChange(Base):
+    __tablename__ = "run_code_changes"
+    __table_args__ = (
+        Index("ix_run_code_changes_run_id", "run_id"),
+        Index("ix_run_code_changes_result_commit_sha", "result_commit_sha"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    run_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("agent_runs.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    base_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    result_commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commit_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    changed_files_json: Mapped[list[dict[str, Any]]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, default=utc_now)
+
+    run: Mapped[AgentRun] = relationship(back_populates="code_changes")
